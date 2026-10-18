@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from town_navigation import find_map_path, find_town_path
 from minimap import TacticalMap
 
-from PySide6.QtCore import QObject, Signal, Qt, QTimer
+from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -285,6 +285,24 @@ PORTAL_CENTERS = {
     (6, 1): (3872, 96), (6, 3): (7264, 4320),
 }
 
+KEYRING_SERVICE = "Tabby Desktop"
+KEYRING_ACCOUNT = "game-wallet-private-key"
+
+
+def secure_keyring():
+    """Return an OS credential-store backend; refuse plaintext keyrings."""
+    import keyring
+
+    backend = keyring.get_keyring()
+    module = type(backend).__module__
+    secure_modules = (
+        "keyring.backends.macOS", "keyring.backends.Windows",
+        "keyring.backends.SecretService", "keyring.backends.kwallet",
+    )
+    if backend.priority <= 0 or not module.startswith(secure_modules):
+        raise RuntimeError("系统安全钥匙串不可用，拒绝将私钥保存到普通文件")
+    return keyring
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -307,6 +325,9 @@ class MainWindow(QMainWindow):
         self.signed_session_token = ""
         self._resolved_token = ""
         self.manual_disconnect = False
+        self._auto_reconnect_login = False
+        self._reconnect_attempt = 0
+        self.settings = QSettings("Tabby", "TabbyDesktop")
         self.reset_world_state()
         self.keepalive = QTimer(self)
         self.keepalive.setInterval(2000)
@@ -325,6 +346,9 @@ class MainWindow(QMainWindow):
         self.chase_timer.setInterval(66)
         self.chase_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.chase_timer.timeout.connect(self.advance_chase)
+        self.reconnect_timer = QTimer(self)
+        self.reconnect_timer.setSingleShot(True)
+        self.reconnect_timer.timeout.connect(self.retry_connection)
 
         root = QWidget()
         root.setObjectName("root")
@@ -401,6 +425,16 @@ class MainWindow(QMainWindow):
         self.auto_auth.setChecked(True)
         self.auto_auth.setToolTip("按发布客户端的 pvp_client.gd 发送完整位置认证帧。")
         card_layout.addWidget(self.auto_auth)
+        self.auto_reconnect = QCheckBox("断线后自动重连")
+        self.auto_reconnect.setChecked(self.settings.value("autoReconnect", True, type=bool))
+        self.auto_reconnect.setToolTip("手动断开除外。启用钱包记忆后，重连时可自动刷新签名会话。")
+        self.auto_reconnect.toggled.connect(lambda checked: self.settings.setValue("autoReconnect", checked))
+        card_layout.addWidget(self.auto_reconnect)
+        self.remember_private_key = QCheckBox("记住钱包私钥（系统钥匙串）")
+        self.remember_private_key.setChecked(self.settings.value("rememberPrivateKey", False, type=bool))
+        self.remember_private_key.setToolTip("仅保存到系统钥匙串/凭据管理器；不会写入应用配置文件。")
+        self.remember_private_key.toggled.connect(self.on_remember_private_key_toggled)
+        card_layout.addWidget(self.remember_private_key)
 
         self.advanced_button = QPushButton("高级设置")
         self.advanced_button.setObjectName("quietButton")
@@ -1117,6 +1151,9 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setEnabled(True)
         self.connect_button.setEnabled(False)
         self.manual_disconnect = False
+        self._auto_reconnect_login = False
+        self._reconnect_attempt = 0
+        self.reconnect_timer.stop()
         self.active_url.setText(ws.url)
         self.active_url.setToolTip(ws.url)
         self.bridge.state.emit("已连接")
@@ -1134,8 +1171,46 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
         self.send_button.setEnabled(False)
+        self.schedule_auto_reconnect()
+
+    def schedule_auto_reconnect(self) -> None:
+        if self.manual_disconnect or not self.auto_reconnect.isChecked():
+            self._auto_reconnect_login = False
+            return
+        if self._reconnect_attempt >= 8:
+            self.append_log("自动重连连续失败 8 次，已暂停；请检查网络或手动重试。")
+            self._auto_reconnect_login = False
+            return
+        delay = min(30, 2 ** self._reconnect_attempt)
+        self._reconnect_attempt += 1
+        self.append_log(f"{delay} 秒后自动重连（第 {self._reconnect_attempt} 次）。")
+        self.bridge.state.emit(f"{delay} 秒后自动重连…")
+        self.reconnect_timer.start(delay * 1000)
+
+    def retry_connection(self) -> None:
+        if self.manual_disconnect or not self.auto_reconnect.isChecked():
+            return
+        self._auto_reconnect_login = True
+        self._resolved_token = ""
+        if self.auth_method.currentData() == "private_key":
+            self.signed_session_token = ""
+        self.connect_ws()
+
+    def on_remember_private_key_toggled(self, checked: bool) -> None:
+        self.settings.setValue("rememberPrivateKey", checked)
+        if checked:
+            return
+        try:
+            secure_keyring().delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+            self.append_log("已从系统钥匙串删除已记住的钱包私钥。")
+        except Exception:
+            # No saved entry is the common case; avoid leaking backend details.
+            pass
 
     def connect_ws(self) -> None:
+        if not self._auto_reconnect_login:
+            self.reconnect_timer.stop()
+            self._reconnect_attempt = 0
         if self.auth_method.currentData() == "private_key" and not self._resolved_token:
             if self.signed_session_token:
                 self._resolved_token = self.signed_session_token
@@ -1267,10 +1342,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "需要安全连接", "私钥签名登录只允许通过 wss:// 地址发起。")
             return
         private_key = self.private_key.text().strip()
+        if not private_key and self.remember_private_key.isChecked():
+            try:
+                private_key = secure_keyring().get_password(KEYRING_SERVICE, KEYRING_ACCOUNT) or ""
+            except Exception:
+                QMessageBox.warning(self, "系统钥匙串不可用", "无法读取已记住的私钥。请检查系统钥匙串，或重新输入私钥。")
+                return
         if not private_key:
             QMessageBox.information(self, "需要私钥", "请输入用于本机签名的钱包私钥。")
             return
         self.private_key.clear()
+        remember_private_key = self.remember_private_key.isChecked()
+        automatic_reauth = self._auto_reconnect_login and remember_private_key
         api_path = parsed.path.rstrip("/")
         if api_path.endswith("/realtime"):
             api_path = api_path[:-len("/realtime")]
@@ -1321,7 +1404,8 @@ class MainWindow(QMainWindow):
                 if not challenge_id or not isinstance(message, str) or not message:
                     raise RuntimeError("签名挑战缺少 challengeId 或 message")
                 approval = threading.Event()
-                approval_data = {"message": message, "approved": False, "event": approval}
+                approval_data = {"message": message, "approved": False, "event": approval,
+                                 "automatic": automatic_reauth}
                 self.bridge.sign_challenge.emit(approval_data)
                 if not approval.wait(timeout=180) or not approval_data["approved"]:
                     raise RuntimeError("已取消签名登录")
@@ -1337,8 +1421,15 @@ class MainWindow(QMainWindow):
                 game_token = entered.get("token")
                 if not game_token:
                     raise RuntimeError("入场验证未返回游戏会话 token；请确认钱包具备测试服资格")
+                remember_error = ""
+                if remember_private_key:
+                    try:
+                        secure_keyring().set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, key_material)
+                    except Exception:
+                        remember_error = "登录成功，但系统钥匙串保存失败；私钥未被记住。"
                 self.bridge.signed_login.emit({"ok": True, "token": str(game_token),
-                                               "address": account.address})
+                                               "address": account.address,
+                                               "remember_error": remember_error})
             except Exception as exc:
                 self.bridge.signed_login.emit({"ok": False,
                                                "error": f"{type(exc).__name__}: {exc}"})
@@ -1349,6 +1440,9 @@ class MainWindow(QMainWindow):
 
     def confirm_sign_challenge(self, approval_data: dict) -> None:
         try:
+            if approval_data.get("automatic"):
+                approval_data["approved"] = True
+                return
             dialog = QMessageBox(self)
             dialog.setWindowTitle("确认钱包签名")
             dialog.setIcon(QMessageBox.Icon.Warning)
@@ -1367,11 +1461,18 @@ class MainWindow(QMainWindow):
             error = result.get("error", "签名登录失败") if isinstance(result, dict) else "签名登录失败"
             self.bridge.state.emit("签名登录失败")
             self.append_log("签名登录失败：" + str(error))
+            was_auto_reconnect = self._auto_reconnect_login
+            self._auto_reconnect_login = False
+            if was_auto_reconnect:
+                self.schedule_auto_reconnect()
+                return
             QMessageBox.warning(self, "签名登录失败", str(error))
             return
         self.session_token = str(result["token"])
         self.signed_session_token = self.session_token
         address = str(result.get("address", ""))
+        if result.get("remember_error"):
+            self.append_log(str(result["remember_error"]))
         self.append_log(f"钱包签名验证成功：{address[:8]}…{address[-6:]}；游戏 token 已留在内存中。")
         self._resolved_token = self.session_token
         self.connect_ws()
@@ -1424,6 +1525,8 @@ class MainWindow(QMainWindow):
 
     def disconnect_ws(self) -> None:
         self.manual_disconnect = True
+        self._auto_reconnect_login = False
+        self.reconnect_timer.stop()
         self.keepalive.stop()
         self.position_sync_timer.stop()
         ws, self.ws = self.ws, None

@@ -96,6 +96,8 @@ class DesktopWindow(QMainWindow):
             '签名流程：POST /membership/challenge → /membership/verify → /membership/enter'
         )
         account_layout.addWidget(self.account_sign_help)
+        account_layout.addWidget(self.game.remember_private_key)
+        account_layout.addWidget(self.game.auto_reconnect)
         self.game.auth_method.currentIndexChanged.connect(self.update_account_auth_fields)
         self.update_account_auth_fields()
         row = QHBoxLayout()
