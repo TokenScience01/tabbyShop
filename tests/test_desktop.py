@@ -88,6 +88,24 @@ class DesktopTests(unittest.TestCase):
         self.window.account_token.setText('changed-session')
         self.assertEqual(shop.read_token(), 'Bearer changed-session')
 
+    def test_task_limited_mode_stops_at_objective_and_task_cap(self):
+        game = self.window.game
+        game.task_limited_mode.setChecked(True)
+        game.latest_quests = [{
+            'id': 1, 'objectiveType': 'MONSTER', 'accepted': True,
+            'completed': False, 'progress': 2, 'target': 5, 'mapId': 2,
+        }]
+        self.assertTrue(game.has_active_monster_quest())
+        self.assertTrue(game.monster_matches_active_quest({'mapId': 2}))
+        self.assertFalse(game.monster_matches_active_quest({'mapId': 4}))
+        game.latest_quests[0]['progress'] = 5
+        self.assertFalse(game.has_active_monster_quest())
+
+        game.handle_quest_limit_reached('daily cap')
+        self.assertFalse(game.questless_farm_mode)
+        self.assertIsNone(game.questless_farm_target)
+        self.assertFalse(game.combat_timer.isActive())
+
 
 if __name__ == '__main__':
     unittest.main()

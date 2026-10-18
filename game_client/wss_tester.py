@@ -677,6 +677,10 @@ class MainWindow(QMainWindow):
         self.auto_quest = QCheckBox("完成后自动接打怪任务")
         self.auto_quest.setChecked(True)
         quest_title_row.addWidget(self.auto_quest)
+        self.task_limited_mode = QCheckBox("任务有限模式")
+        self.task_limited_mode.setToolTip("只攻击当前进行中的怪物任务目标；完成、无可接任务或今日领取已满时暂停，不转为自由刷怪。")
+        self.task_limited_mode.toggled.connect(self.on_task_limited_mode_changed)
+        quest_title_row.addWidget(self.task_limited_mode)
         self.quest_map_auto = QCheckBox("按任务地图自动进图")
         self.quest_map_auto.setToolTip("自动接取新任务后，沿地图入口路线前往该任务对应地图。遗迹仍需入场券。")
         self.quest_map_auto.stateChanged.connect(self.on_quest_map_auto_changed)
@@ -1021,6 +1025,7 @@ class MainWindow(QMainWindow):
         quest_box.setSpacing(10)
         quest_row = QHBoxLayout()
         place(quest_row, self.auto_quest)
+        place(quest_row, self.task_limited_mode)
         quest_row.addStretch()
         place(quest_row, self.refresh_profile_button)
         quest_box.addLayout(quest_row)
@@ -1932,8 +1937,74 @@ class MainWindow(QMainWindow):
         active = sum(bool(q.get("accepted")) and not bool(q.get("completed")) for q in rows)
         self.quest_status.setText(f"服务端任务 {len(rows)} 条 · 进行中 {active} 条 · 悬停可看奖励" if rows else "服务端暂未下发任务。")
         self.refresh_quest_map_target()
+        if self.task_limited_mode.isChecked():
+            if self.has_active_monster_quest():
+                self.questless_farm_mode = False
+                self.questless_farm_target = None
+                if self.auto_attack.isChecked() and self.world_ready and not self.server_dead:
+                    self.combat_timer.start()
+                self.combat_status.setText("任务有限模式：只攻击当前任务所需怪物。")
+            else:
+                self.combat_timer.stop()
+                self.stop_chase()
+                self.combat_generation += 1
+                self.questless_farm_mode = False
+                self.questless_farm_target = None
+                self.combat_status.setText("任务有限模式：没有进行中的怪物任务，自动攻击已暂停。")
         if not active and hasattr(self, "auto_quest") and self.auto_quest.isChecked():
             self.accept_next_monster_quest()
+
+    def has_active_monster_quest(self) -> bool:
+        for quest in self.latest_quests:
+            if not isinstance(quest, dict) or not quest.get("accepted") or quest.get("completed"):
+                continue
+            if quest.get("objectiveType") != "MONSTER":
+                continue
+            try:
+                progress = float(quest.get("progress", 0))
+                target = float(quest.get("target", math.inf))
+            except (TypeError, ValueError):
+                progress, target = 0, math.inf
+            if progress < target:
+                return True
+        return False
+
+    def monster_matches_active_quest(self, monster: dict) -> bool:
+        if not self.task_limited_mode.isChecked():
+            return True
+        for quest in self.latest_quests:
+            if (not isinstance(quest, dict) or not quest.get("accepted") or quest.get("completed")
+                    or quest.get("objectiveType") != "MONSTER"):
+                continue
+            try:
+                if float(quest.get("progress", 0)) >= float(quest.get("target", math.inf)):
+                    continue
+                quest_map = quest.get("mapId")
+                if quest_map is None or int(quest_map) == int(monster.get("mapId", -1)):
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def on_task_limited_mode_changed(self, enabled: bool) -> None:
+        if enabled:
+            was_free_farming = self.questless_farm_mode
+            self.questless_farm_mode = False
+            self.questless_farm_target = None
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            if was_free_farming and (self.pending_destination is not None or self.move_timer.isActive()):
+                self.cancel_travel()
+            if not self.has_active_monster_quest():
+                self.combat_timer.stop()
+                self.stop_chase()
+                self.combat_generation += 1
+                self.combat_status.setText("任务有限模式：等待当前怪物任务或自动接取下一项。")
+            elif self.auto_attack.isChecked() and self.world_ready and not self.server_dead:
+                self.combat_timer.start()
+                self.combat_status.setText("任务有限模式：只攻击当前任务所需怪物。")
+        elif self.auto_attack.isChecked() and self.world_ready and not self.server_dead:
+            self.combat_timer.start()
 
     def on_quest_map_auto_changed(self, *_args) -> None:
         self.refresh_quest_map_target()
@@ -2117,6 +2188,23 @@ class MainWindow(QMainWindow):
 
     def handle_quest_limit_reached(self, detail: str = "") -> None:
         self.quest_accept_blocked_date = datetime.now().date()
+        if self.task_limited_mode.isChecked():
+            if self.questless_farm_mode and (self.pending_destination is not None or self.move_timer.isActive()):
+                self.cancel_travel()
+            self.questless_farm_mode = False
+            self.questless_farm_target = None
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            self.combat_timer.stop()
+            self.stop_chase()
+            self.combat_generation += 1
+            explanation = "今日任务领取已满；任务有限模式已暂停自动战斗，不会切换为自由刷怪。"
+            if detail:
+                explanation += f" 服务端：{detail}"
+            self.quest_status.setText(explanation)
+            self.combat_status.setText("任务有限模式：今日任务额度已用完，自动攻击已暂停。")
+            self.append_log(explanation)
+            return
         self.questless_farm_mode = True
         self.quest_map_target = None
         self.quest_map_quest_id = None
@@ -2483,6 +2571,12 @@ class MainWindow(QMainWindow):
 
     def attack_monster(self, encounter_id: str) -> bool:
         monster = self.monsters.get(encounter_id)
+        if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
+            self.combat_status.setText("任务有限模式：当前没有未完成的怪物任务，不会攻击。")
+            return False
+        if self.task_limited_mode.isChecked() and monster is not None and not self.monster_matches_active_quest(monster):
+            self.combat_status.setText("任务有限模式：该怪物不属于当前任务地图，已跳过。")
+            return False
         if self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending or self.pending_destination is not None or monster is None:
             self.combat_status.setText("目标已消失或游戏会话尚未就绪。")
             return False
@@ -2573,6 +2667,10 @@ class MainWindow(QMainWindow):
             self.combat_timer.stop()
             self.combat_status.setText("自动战斗已保留；等待服务端确认复活后恢复。")
             return
+        if enabled and self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
+            self.combat_timer.stop()
+            self.combat_status.setText("任务有限模式：没有未完成的怪物任务，自动攻击保持暂停。")
+            return
         if enabled and self.world_ready:
             self.combat_timer.start()
             self.combat_status.setText("自动战斗已开启：" + ("搜索当前地图的精英怪。" if self.elite_only.isChecked() else "搜索当前地图全部怪物。"))
@@ -2592,6 +2690,11 @@ class MainWindow(QMainWindow):
                                        else "自动战斗：追击附近怪物。")
 
     def auto_attack_tick(self) -> None:
+        if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
+            self.combat_timer.stop()
+            self.stop_chase()
+            self.combat_status.setText("任务有限模式：当前没有未完成的怪物任务，自动攻击已暂停。")
+            return
         if self.return_map_target is not None:
             return
         if self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending or self.pending_destination is not None:
@@ -2603,6 +2706,7 @@ class MainWindow(QMainWindow):
                       for encounter_id, monster in self.monsters.items()
                       if int(monster.get("mapId", -1)) == self.current_map
                       and int(monster.get("health", 0)) > 0
+                      and self.monster_matches_active_quest(monster)
                       and time.monotonic() >= self.invalid_target_until.get(encounter_id, 0.0)
                       and (not self.elite_only.isChecked() or
                            str(monster.get("monsterRank", "")).upper() == "ELITE")]
