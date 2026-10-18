@@ -14,6 +14,7 @@ import struct
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -219,6 +220,8 @@ class Bridge(QObject):
     connect_failed = Signal()
     packet = Signal(object)
     profile = Signal(object)
+    signed_login = Signal(object)
+    sign_challenge = Signal(object)
 
 
 MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地",
@@ -226,6 +229,54 @@ MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地
              5: "Abandoned Ruins · 废弃遗迹", 6: "Southern Forest · 南部森林"}
 MAP_ROUTES = {1: (2, 4, 5, 6), 2: (1,), 3: (6,),
               4: (1,), 5: (1,), 6: (1, 3)}
+CHARACTER_NAMES_ZH = {"WARRIOR": "战士", "GUARD": "守卫", "LANCER": "枪兵", "ARCHER": "弓手"}
+# Names mirrored from the game's bundled resources/localization/names_zh.gd.
+MONSTER_NAMES_ZH = {
+    "skeleton": "骷髅怪", "elite_skeleton": "精英骷髅怪",
+    "neiro_pump": "南瓜首领",
+}
+SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES": "鞋子",
+                 "RING": "戒指", "AMULET": "护符", "OTHER": "消耗品"}
+QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀", "RARE": "稀有",
+                    "EPIC": "史诗", "LEGENDARY": "传说"}
+try:
+    _item_name_rows = json.loads((Path(__file__).with_name("assets") / "item_names_zh.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    _item_name_rows = []
+ITEM_NAMES_ZH = {str(row.get("itemCode", "")).upper(): row.get("nameZh", "")
+                 for row in _item_name_rows if isinstance(row, dict)}
+ITEM_NAMES_ZH.update({str(row.get("nameEn", "")).casefold(): row.get("nameZh", "")
+                      for row in _item_name_rows if isinstance(row, dict)})
+
+
+def localized_item_name(item: dict) -> str:
+    for key in ("nameZh", "displayNameZh"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    code = str(item.get("itemCode", "")).upper()
+    name = str(item.get("name") or item.get("displayName") or item.get("nameEn") or "")
+    return str(ITEM_NAMES_ZH.get(code) or ITEM_NAMES_ZH.get(name.casefold()) or name or code or "物品")
+
+
+def localized_monster_name(monster: dict) -> str:
+    for key in ("nameZh", "monsterNameZh", "displayNameZh"):
+        value = monster.get(key)
+        if value:
+            return str(value)
+    candidates = (monster.get("monsterKey"), monster.get("name"), monster.get("displayName"))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = str(candidate).strip().casefold().replace(" ", "_").replace("-", "_")
+        normalized = normalized.removeprefix("monster.")
+        if normalized == "skeleton" and str(monster.get("monsterRank", "")).upper() == "ELITE":
+            normalized = "elite_skeleton"
+        if normalized in MONSTER_NAMES_ZH:
+            return MONSTER_NAMES_ZH[normalized]
+    return str(monster.get("name") or monster.get("displayName") or monster.get("monsterKey") or "怪物")
+
+
 PORTAL_CENTERS = {
     (1, 2): (928, -224), (1, 4): (-544, 928),
     (1, 5): (2464, 928), (1, 6): (928, 1952),
@@ -248,8 +299,13 @@ class MainWindow(QMainWindow):
         self.bridge.connect_failed.connect(self.on_connect_failed)
         self.bridge.packet.connect(self.accept_packet)
         self.bridge.profile.connect(self.accept_profile_data)
+        self.bridge.signed_login.connect(self.finish_signed_login)
+        self.bridge.sign_challenge.connect(self.confirm_sign_challenge)
         self.ws: MiniWebSocket | None = None
         self.reader: threading.Thread | None = None
+        self.session_token = ""
+        self.signed_session_token = ""
+        self._resolved_token = ""
         self.manual_disconnect = False
         self.reset_world_state()
         self.keepalive = QTimer(self)
@@ -315,6 +371,16 @@ class MainWindow(QMainWindow):
         self.token.setMinimumHeight(38)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.token.setPlaceholderText("粘贴游戏 Token，点击连接；仅保存在当前进程")
+        self.auth_method = QComboBox()
+        self.auth_method.addItem("Token 登录", "token")
+        self.auth_method.addItem("BSC 私钥签名", "private_key")
+        self.auth_method.setToolTip("私钥仅在本机用于签名，不会发送给服务器或保存到磁盘。")
+        self.private_key = QLineEdit()
+        self.private_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.private_key.setPlaceholderText("输入 EVM 私钥（BSC / chainId 56），仅用于本次签名")
+        self.private_key.textEdited.connect(self.invalidate_signed_session)
+        private_key_label = QLabel("钱包私钥（本机签名）")
+        private_key_label.setObjectName("fieldLabel")
         origin_label = QLabel("Origin")
         token_label = QLabel("游戏会话 token")
         for label in (origin_label, token_label):
@@ -323,9 +389,14 @@ class MainWindow(QMainWindow):
         fields.addWidget(token_label, 0, 1)
         fields.addWidget(self.origin, 1, 0)
         fields.addWidget(self.token, 1, 1)
+        fields.addWidget(private_key_label, 2, 0, 1, 2)
+        fields.addWidget(self.private_key, 3, 0, 1, 2)
+        private_key_label.hide()
+        self.private_key.hide()
         fields.setColumnStretch(0, 1)
         fields.setColumnStretch(1, 1)
         card_layout.addLayout(fields)
+        card_layout.addWidget(self.auth_method)
         self.auto_auth = QCheckBox("连接成功后发送客户端登录帧")
         self.auto_auth.setChecked(True)
         self.auto_auth.setToolTip("按发布客户端的 pvp_client.gd 发送完整位置认证帧。")
@@ -396,6 +467,7 @@ class MainWindow(QMainWindow):
         advanced_close.clicked.connect(self.advanced_dialog.accept)
         advanced_layout.addWidget(advanced_close, 0, Qt.AlignmentFlag.AlignRight)
         self.advanced_button.clicked.connect(self.advanced_dialog.open)
+        self.auth_method.currentIndexChanged.connect(self.update_auth_fields)
 
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 4, 0, 0)
@@ -481,6 +553,13 @@ class MainWindow(QMainWindow):
         self.api_equipment = {}
         self.last_progress_state = {}
         self.last_self_state = {}
+        self.latest_quests = []
+        self.quest_map_target = None
+        self.quest_map_quest_id = None
+        self.last_quest_map = None
+        self.questless_farm_mode = False
+        self.questless_farm_target = None
+        self.quest_accept_blocked_date = None
         self.quest_accept_inflight = False
         self.quest_accept_checked_at = 0.0
         self.profile_refresh_inflight = False
@@ -564,6 +643,11 @@ class MainWindow(QMainWindow):
         self.auto_quest = QCheckBox("完成后自动接打怪任务")
         self.auto_quest.setChecked(True)
         quest_title_row.addWidget(self.auto_quest)
+        self.quest_map_auto = QCheckBox("按任务地图自动进图")
+        self.quest_map_auto.setToolTip("自动接取新任务后，沿地图入口路线前往该任务对应地图。遗迹仍需入场券。")
+        self.quest_map_auto.stateChanged.connect(self.on_quest_map_auto_changed)
+        self.use_ticket.stateChanged.connect(lambda *_: QTimer.singleShot(0, self.continue_quest_map_travel))
+        quest_title_row.addWidget(self.quest_map_auto)
         quest_title_row.addWidget(self.refresh_profile_button)
         quest_layout.addLayout(quest_title_row)
         self.quest_status = QLabel("等待服务端任务数据…")
@@ -752,13 +836,16 @@ class MainWindow(QMainWindow):
         connection.setObjectName("card")
         connect_row = QHBoxLayout(connection)
         connect_row.setContentsMargins(14, 12, 14, 12)
-        connect_row.addWidget(QLabel("TOKEN"))
+        connect_row.addWidget(QLabel("登录方式"))
+        place(connect_row, self.auth_method)
         place(connect_row, self.token, 1)
+        place(connect_row, self.private_key, 1)
         for widget in (self.connect_button, self.disconnect_button, self.advanced_button):
             place(connect_row, widget)
         layout.addWidget(connection)
         connection.hide()
         self.account_toggle.toggled.connect(connection.setVisible)
+        self.update_auth_fields()
 
         columns = QHBoxLayout()
         columns.setSpacing(14)
@@ -1049,6 +1136,12 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(False)
 
     def connect_ws(self) -> None:
+        if self.auth_method.currentData() == "private_key" and not self._resolved_token:
+            if self.signed_session_token:
+                self._resolved_token = self.signed_session_token
+            else:
+                self.start_signed_login()
+                return
         self.keepalive.stop()
         self.reset_world_state()
         self.update_map_buttons()
@@ -1065,9 +1158,9 @@ class MainWindow(QMainWindow):
         origin = self.origin.text().strip()
         if origin:
             headers["Origin"] = origin
-        token = self.token.text().strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
+        token = self._resolved_token or self.get_session_token()
+        self._resolved_token = ""
+        self.session_token = token
         token_info = "未填写"
         if token:
             fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
@@ -1149,6 +1242,140 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def update_auth_fields(self, *_args) -> None:
+        private_mode = self.auth_method.currentData() == "private_key"
+        self.token.setVisible(not private_mode)
+        self.private_key.setVisible(private_mode)
+
+    def invalidate_signed_session(self, *_args) -> None:
+        self.signed_session_token = ""
+        if self.auth_method.currentData() == "private_key":
+            self.session_token = ""
+
+    def get_session_token(self) -> str:
+        if self.auth_method.currentData() == "private_key":
+            return self.signed_session_token.strip()
+        token = self.token.text().strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        return token
+
+    def start_signed_login(self) -> None:
+        url = self.url.text().strip()
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "wss" or not parsed.netloc:
+            QMessageBox.warning(self, "需要安全连接", "私钥签名登录只允许通过 wss:// 地址发起。")
+            return
+        private_key = self.private_key.text().strip()
+        if not private_key:
+            QMessageBox.information(self, "需要私钥", "请输入用于本机签名的钱包私钥。")
+            return
+        self.private_key.clear()
+        api_path = parsed.path.rstrip("/")
+        if api_path.endswith("/realtime"):
+            api_path = api_path[:-len("/realtime")]
+        api_base = urllib.parse.urlunsplit(("https", parsed.netloc, api_path, "", ""))
+        self.keepalive.stop()
+        self.reset_world_state()
+        self.update_map_buttons()
+        self.connect_button.setEnabled(False)
+        self.bridge.state.emit("本机签名登录中…")
+        self.append_log("正在通过钱包签名获取游戏会话；私钥与签名不会写入日志。")
+
+        def worker() -> None:
+            key_material = private_key
+            try:
+                from eth_account import Account
+                from eth_account.messages import encode_defunct
+
+                account = Account.from_key(key_material)
+
+                def request(path: str, body: dict, bearer: str | None = None) -> dict:
+                    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+                    if bearer:
+                        headers["Authorization"] = "Bearer " + bearer
+                    request_body = json.dumps(body).encode("utf-8")
+                    req = urllib.request.Request(api_base + path, data=request_body,
+                                                 headers=headers, method="POST")
+                    try:
+                        with urllib.request.urlopen(req, timeout=15) as response:
+                            result = json.loads(response.read().decode("utf-8"))
+                    except urllib.error.HTTPError as exc:
+                        raw = exc.read().decode("utf-8", errors="replace")
+                        try:
+                            error_data = json.loads(raw)
+                        except (TypeError, ValueError):
+                            error_data = {"message": raw[:300]}
+                        code = error_data.get("code", "") if isinstance(error_data, dict) else ""
+                        message = error_data.get("message", "") if isinstance(error_data, dict) else ""
+                        raise RuntimeError(str(code or message or f"HTTP {exc.code}")) from None
+                    if not isinstance(result, dict):
+                        raise RuntimeError("服务端返回格式无效")
+                    if result.get("code") and not result.get("walletToken") and not result.get("token"):
+                        raise RuntimeError(str(result["code"]))
+                    return result
+
+                challenge = request("/membership/challenge", {"address": account.address, "chainId": 56})
+                challenge_id = challenge.get("challengeId")
+                message = challenge.get("message")
+                if not challenge_id or not isinstance(message, str) or not message:
+                    raise RuntimeError("签名挑战缺少 challengeId 或 message")
+                approval = threading.Event()
+                approval_data = {"message": message, "approved": False, "event": approval}
+                self.bridge.sign_challenge.emit(approval_data)
+                if not approval.wait(timeout=180) or not approval_data["approved"]:
+                    raise RuntimeError("已取消签名登录")
+                signed = Account.sign_message(encode_defunct(text=message), key_material)
+                signature = signed.signature.hex()
+                verification = request("/membership/verify", {
+                    "challengeId": challenge_id, "signature": signature, "chainId": 56
+                })
+                wallet_token = verification.get("walletToken")
+                if not wallet_token:
+                    raise RuntimeError("签名验证未返回 walletToken")
+                entered = request("/membership/enter", {}, str(wallet_token))
+                game_token = entered.get("token")
+                if not game_token:
+                    raise RuntimeError("入场验证未返回游戏会话 token；请确认钱包具备测试服资格")
+                self.bridge.signed_login.emit({"ok": True, "token": str(game_token),
+                                               "address": account.address})
+            except Exception as exc:
+                self.bridge.signed_login.emit({"ok": False,
+                                               "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                key_material = ""
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def confirm_sign_challenge(self, approval_data: dict) -> None:
+        try:
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("确认钱包签名")
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setText("服务端请求对下方消息进行 EIP-191 签名。确认这是本次游戏登录挑战后再继续。")
+            dialog.setTextFormat(Qt.TextFormat.PlainText)
+            dialog.setDetailedText(str(approval_data.get("message", "")))
+            dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            dialog.setDefaultButton(QMessageBox.StandardButton.No)
+            approval_data["approved"] = dialog.exec() == QMessageBox.StandardButton.Yes
+        finally:
+            approval_data["event"].set()
+
+    def finish_signed_login(self, result: dict) -> None:
+        self.connect_button.setEnabled(True)
+        if not isinstance(result, dict) or not result.get("ok"):
+            error = result.get("error", "签名登录失败") if isinstance(result, dict) else "签名登录失败"
+            self.bridge.state.emit("签名登录失败")
+            self.append_log("签名登录失败：" + str(error))
+            QMessageBox.warning(self, "签名登录失败", str(error))
+            return
+        self.session_token = str(result["token"])
+        self.signed_session_token = self.session_token
+        address = str(result.get("address", ""))
+        self.append_log(f"钱包签名验证成功：{address[:8]}…{address[-6:]}；游戏 token 已留在内存中。")
+        self._resolved_token = self.session_token
+        self.connect_ws()
+
     def read_loop(self, ws: MiniWebSocket) -> None:
         try:
             while self.ws is ws:
@@ -1222,6 +1449,8 @@ class MainWindow(QMainWindow):
         self.server_dead = False
         self.respawn_pending = False
         self.return_map_target = None
+        self.quest_map_target = None
+        self.quest_map_quest_id = None
         self.respawn_attempts = 0
         self.respawn_request_generation = getattr(self, "respawn_request_generation", 0) + 1
         self.current_map = None
@@ -1364,6 +1593,8 @@ class MainWindow(QMainWindow):
                     if self.auto_return_map.isChecked():
                         self.return_map_target = self.return_map.currentData()
                         QTimer.singleShot(500, self.continue_return_map)
+                    elif self.questless_farm_mode:
+                        QTimer.singleShot(500, self.continue_quest_map_travel)
             if isinstance(self_state, dict) and "life" in self_state:
                 self.life = int(self_state["life"])
             if isinstance(self_state, dict) and isinstance(self_state.get("nextAttack"), dict):
@@ -1387,6 +1618,8 @@ class MainWindow(QMainWindow):
                     self.auto_attack.setChecked(True)
                 elif self.auto_attack.isChecked() and not self.server_dead:
                     self.combat_timer.start()
+                if self.questless_farm_mode:
+                    QTimer.singleShot(500, self.continue_quest_map_travel)
                 self.refresh_profile_data()
             self.update_map_buttons()
             if detected_death:
@@ -1416,8 +1649,12 @@ class MainWindow(QMainWindow):
             self.update_map_buttons()
             if packet.get("ok") and self.return_map_target is not None:
                 QTimer.singleShot(500, self.continue_return_map)
+            elif packet.get("ok") and (self.quest_map_target is not None or self.questless_farm_mode):
+                QTimer.singleShot(500, self.continue_quest_map_travel)
             elif not packet.get("ok"):
                 self.return_map_target = None
+                self.quest_map_target = None
+                self.quest_map_quest_id = None
         elif kind == "attack_ready" and isinstance(packet.get("nextAttack"), dict):
             self.accept_attack_ticket(packet["nextAttack"])
         elif kind == "hit" and isinstance(packet.get("hit"), dict):
@@ -1438,6 +1675,8 @@ class MainWindow(QMainWindow):
                     + (" · 暴击" if hit.get("critical") else "")
                 )
             self.refresh_profile_data()
+        elif kind == "error" and self.is_quest_limit_response(packet):
+            self.handle_quest_limit_reached(self.quest_error_text(packet))
         elif kind == "error" and packet.get("action") == "monsterAttack":
             code = str(packet.get("code", "未知错误"))
             rejected_id = self.last_attacked_monster
@@ -1558,6 +1797,16 @@ class MainWindow(QMainWindow):
 
     def update_quests(self, quests: list) -> None:
         rows = [quest for quest in quests if isinstance(quest, dict)]
+        self.latest_quests = rows
+        for quest in rows:
+            if (quest.get("mapId") is not None and
+                    (quest.get("accepted") or quest.get("completed"))):
+                try:
+                    map_id = int(quest["mapId"])
+                    if map_id in MAP_NAMES:
+                        self.last_quest_map = map_id
+                except (TypeError, ValueError):
+                    pass
         self.quest_table.setRowCount(len(rows))
         for index, quest in enumerate(rows):
             done = bool(quest.get("completed"))
@@ -1565,7 +1814,10 @@ class MainWindow(QMainWindow):
             available = bool(quest.get("available"))
             state = "已完成" if done else "进行中" if accepted else "可接取" if available else "未解锁"
             map_id = quest.get("mapId")
-            map_name = MAP_NAMES.get(map_id, str(map_id) if map_id is not None else "—")
+            try:
+                map_name = MAP_NAMES.get(int(map_id), str(map_id)) if map_id is not None else "—"
+            except (TypeError, ValueError):
+                map_name = str(map_id) if map_id is not None else "—"
             values = [str(quest.get("id", "—")), str(quest.get("titleZh") or quest.get("title") or "未命名任务"),
                       map_name, f"{quest.get('progress', 0)}/{quest.get('target', '—')}", state]
             rewards = (f"经验 {quest.get('rewardExperience', 0)} · 金币 {quest.get('rewardGold', 0)}"
@@ -1576,16 +1828,100 @@ class MainWindow(QMainWindow):
                 self.quest_table.setItem(index, col, item)
         active = sum(bool(q.get("accepted")) and not bool(q.get("completed")) for q in rows)
         self.quest_status.setText(f"服务端任务 {len(rows)} 条 · 进行中 {active} 条 · 悬停可看奖励" if rows else "服务端暂未下发任务。")
+        self.refresh_quest_map_target()
         if not active and hasattr(self, "auto_quest") and self.auto_quest.isChecked():
             self.accept_next_monster_quest()
 
+    def on_quest_map_auto_changed(self, *_args) -> None:
+        self.refresh_quest_map_target()
+
+    def refresh_quest_map_target(self) -> None:
+        if self.questless_farm_mode:
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            return
+        if not getattr(self, "quest_map_auto", None) or not self.quest_map_auto.isChecked():
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            return
+        active = [q for q in self.latest_quests
+                  if q.get("accepted") and not q.get("completed") and q.get("mapId") is not None]
+        if not active:
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            return
+        quest = sorted(active, key=lambda q: q.get("objectiveType") != "MONSTER")[0]
+        try:
+            target = int(quest["mapId"])
+        except (TypeError, ValueError):
+            return
+        if target not in MAP_NAMES:
+            return
+        self.quest_map_target = target
+        try:
+            self.quest_map_quest_id = int(quest.get("id"))
+        except (TypeError, ValueError):
+            self.quest_map_quest_id = None
+        if self.world_ready and self.current_map != target:
+            QTimer.singleShot(0, self.continue_quest_map_travel)
+        elif self.current_map == target:
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+
+    def continue_quest_map_travel(self) -> None:
+        farm_fallback = self.questless_farm_mode and self.questless_farm_target is not None
+        if ((not self.quest_map_auto.isChecked() and not farm_fallback)
+                or (self.quest_map_target is None and not farm_fallback)
+                or self.world_ready is False or self.current_map is None
+                or self.server_dead or self.respawn_pending or self.pending_destination is not None
+                or self.return_map_target is not None):
+            return
+        target = self.quest_map_target if self.quest_map_target is not None else self.questless_farm_target
+        if self.current_map == target:
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            return
+        queue = deque([(self.current_map, [])])
+        visited = {self.current_map}
+        route = None
+        while queue:
+            current, hops = queue.popleft()
+            for neighbor in MAP_ROUTES.get(current, ()):
+                if neighbor in visited:
+                    continue
+                next_hops = hops + [neighbor]
+                if neighbor == target:
+                    route = next_hops
+                    queue.clear()
+                    break
+                visited.add(neighbor)
+                queue.append((neighbor, next_hops))
+        if not route:
+            self.travel_status.setText(f"找不到通往任务地图 {MAP_NAMES[target]} 的入口路线。")
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            return
+        if 5 in route and not self.use_ticket.isChecked():
+            self.travel_status.setText("任务目标在废弃遗迹；请先勾选使用入场券。")
+            return
+        if farm_fallback:
+            self.travel_status.setText(f"今日任务已领满，自动前往 {MAP_NAMES[target]} 巡图刷怪；下一站 {MAP_NAMES[route[0]]}。")
+        else:
+            self.travel_status.setText(f"按当前任务前往 {MAP_NAMES[target]}，下一站 {MAP_NAMES[route[0]]}。")
+        self.travel_to(route[0])
+
     def accept_next_monster_quest(self) -> None:
+        today = datetime.now().date()
+        if self.quest_accept_blocked_date is not None and self.quest_accept_blocked_date != today:
+            self.quest_accept_blocked_date = None
+            self.questless_farm_mode = False
+            self.questless_farm_target = None
+        if self.quest_accept_blocked_date == today:
+            return
         if (not self.world_ready or self.quest_accept_inflight or
                 time.monotonic() - self.quest_accept_checked_at < 15.0):
             return
-        token = self.token.text().strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
+        token = self.get_session_token()
         parsed = urllib.parse.urlsplit(self.url.text().strip())
         if not token or not parsed.netloc:
             return
@@ -1621,14 +1957,89 @@ class MainWindow(QMainWindow):
                 if not active and candidates:
                     candidates.sort(key=lambda q: q.get("mapId") != current_map)
                     chosen = candidates[0]
-                    request("/quests/accept", {"questId": chosen["id"]})
-                    result["acceptedQuestId"] = chosen["id"]
-                    payload = request("/quests")
+                    try:
+                        accepted = request("/quests/accept", {"questId": chosen["id"]})
+                    except urllib.error.HTTPError as exc:
+                        body = exc.read().decode("utf-8", errors="replace")
+                        try:
+                            error_payload = json.loads(body)
+                        except (TypeError, ValueError):
+                            error_payload = body
+                        if self.is_quest_limit_response(error_payload):
+                            result["questLimitReached"] = True
+                            result["questError"] = self.quest_error_text(error_payload) or str(exc)
+                        else:
+                            raise
+                    else:
+                        if self.is_quest_limit_response(accepted):
+                            result["questLimitReached"] = True
+                            result["questError"] = self.quest_error_text(accepted)
+                        else:
+                            result["acceptedQuestId"] = chosen["id"]
+                        payload = request("/quests")
                 result["questData"] = payload
             except Exception as exc:
                 result["questError"] = f"{type(exc).__name__}: {exc}"
             self.bridge.profile.emit(result)
         threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def quest_error_text(value) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("message", "error", "reason", "code", "detail"):
+                item = value.get(key)
+                if isinstance(item, (str, int, float)) and str(item).strip():
+                    return str(item)
+            return json.dumps(value, ensure_ascii=False)
+        return str(value) if value is not None else ""
+
+    @classmethod
+    def is_quest_limit_response(cls, value) -> bool:
+        if isinstance(value, dict):
+            text = " ".join(str(item) for item in value.values()).casefold()
+        elif isinstance(value, (list, tuple)):
+            text = " ".join(str(item) for item in value).casefold()
+        else:
+            text = cls.quest_error_text(value).casefold()
+        markers = (
+            "任务领取已满", "领取已满", "每日任务上限", "任务领取上限",
+            "今日任务已达上限", "今日可领取任务已达上限",
+            "daily quest limit", "quest limit reached", "daily limit reached",
+            "quest_accept_limit", "quest_acceptance_limit", "daily_quest_limit",
+            "quest_daily_limit", "daily_task_limit", "daily_quest_cap",
+        )
+        return any(marker.casefold() in text for marker in markers)
+
+    def handle_quest_limit_reached(self, detail: str = "") -> None:
+        self.quest_accept_blocked_date = datetime.now().date()
+        self.questless_farm_mode = True
+        self.quest_map_target = None
+        self.quest_map_quest_id = None
+        # Keep farming in the last quest zone when known; otherwise use the
+        # selected post-respawn map (Northern Snowfield by default).
+        target = self.last_quest_map
+        if target is None:
+            try:
+                target = int(self.return_map.currentData())
+            except (TypeError, ValueError):
+                target = 2
+        if target not in MAP_NAMES or target == 1 or (target == 5 and not self.use_ticket.isChecked()):
+            target = 2
+        self.questless_farm_target = target
+        self.auto_attack.setChecked(True)
+        explanation = "今日任务领取已满，已切换为无任务刷怪模式。"
+        if detail:
+            explanation += f" 服务端：{detail}"
+        explanation += f" 刷怪地图：{MAP_NAMES[target]}。"
+        self.quest_status.setText(explanation)
+        self.append_log(explanation)
+        if (self.world_ready and not self.server_dead and not self.respawn_pending
+                and self.current_map is not None and self.current_map != target):
+            QTimer.singleShot(0, self.continue_quest_map_travel)
+        elif self.current_map == target:
+            self.travel_status.setText(f"今日任务已领满，留在 {MAP_NAMES[target]} 自动巡图打怪。")
 
     def refresh_profile_data(self, force: bool = False) -> None:
         if self.profile_refresh_inflight:
@@ -1641,9 +2052,7 @@ class MainWindow(QMainWindow):
         throttle = 8.0 if not force else 0.0
         if time.monotonic() - self.profile_refreshed_at < throttle:
             return
-        token = self.token.text().strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
+        token = self.get_session_token()
         if not token:
             return
         parsed = urllib.parse.urlsplit(self.url.text().strip())
@@ -1682,9 +2091,7 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def claim_encounter_reward(self, encounter_id: str) -> None:
-        token = self.token.text().strip()
-        if token.lower().startswith("bearer "):
-            token = token[7:].strip()
+        token = self.get_session_token()
         parsed = urllib.parse.urlsplit(self.url.text().strip())
         scheme = "https" if parsed.scheme == "wss" else "http"
         api_path = parsed.path.rstrip("/")
@@ -1721,9 +2128,13 @@ class MainWindow(QMainWindow):
             self.quest_accept_inflight = False
             if data.get("questError"):
                 self.append_log("自动接取任务未完成：" + data["questError"])
+            if data.get("questLimitReached"):
+                self.quest_accept_blocked_date = datetime.now().date()
             payload = data.get("questData")
             if isinstance(payload, dict) and isinstance(payload.get("quests"), list):
                 self.update_quests(payload["quests"])
+            if data.get("questLimitReached"):
+                self.handle_quest_limit_reached(str(data.get("questError", "")))
             if data.get("acceptedQuestId"):
                 self.append_log(f"已自动接取打怪任务：{data['acceptedQuestId']}")
             return
@@ -1770,6 +2181,7 @@ class MainWindow(QMainWindow):
         name = profile.get("playerName") or profile.get("name") or "角色"
         character_class = profile.get("characterClass") or profile.get("class") or "—"
         character_class = self_state.get("characterClass", character_class)
+        class_display = CHARACTER_NAMES_ZH.get(str(character_class).upper(), character_class)
         if hasattr(self, "character_portrait"):
             kind = "guard" if str(character_class).upper() == "GUARD" else "warrior"
             sprite = QPixmap(str(Path(__file__).with_name("assets") / (kind + "-idle.webp")))
@@ -1805,7 +2217,7 @@ class MainWindow(QMainWindow):
                 self.fatigue_bar.setFormat("等待疲劳数据")
         self.update_backpack()
         if hasattr(self, "character_facts"):
-            values = {"角色": name, "职业": {"WARRIOR": "战士", "GUARD": "守卫"}.get(character_class, character_class),
+            values = {"角色": name, "职业": class_display,
                       "等级": level, "状态": status, "生命": f"{health}/{max_health}",
                       "经验": f"{experience}/{experience_needed}", "攻击": attack, "防御": defense,
                       "金币": gold, "移速加成": f"{totals.get('moveSpeedPercent', 0)}%"}
@@ -1817,7 +2229,7 @@ class MainWindow(QMainWindow):
             for slot, (caption, label) in self.gear_slots.items():
                 item = equipped.get(slot)
                 if item:
-                    title = item.get("nameZh") or item.get("name") or item.get("displayName") or item.get("itemCode") or "已穿戴"
+                    title = localized_item_name(item)
                     label.setText(f"{caption} · {title}")
                     label.setToolTip(json.dumps(item, ensure_ascii=False, indent=2))
                     stem = {"WEAPON": "sword", "HAT": "helmet", "ARMOR": "armor", "SHOES": "boots",
@@ -1832,7 +2244,7 @@ class MainWindow(QMainWindow):
                     label.setText(f"{caption} · 未穿戴" if "items" in equipment else f"{caption} · 等待装备数据")
                     label.setToolTip("")
         self.character_status.setText(
-            f"{name} · {character_class}  |  等级 {level}  |  经验 {experience}/{experience_needed}  |  "
+            f"{name} · {class_display}  |  等级 {level}  |  经验 {experience}/{experience_needed}  |  "
             f"生命 {health}/{max_health}  |  攻击 {attack}  |  防御 {defense}  |  金币 {gold}  |  {status}"
         )
 
@@ -1869,8 +2281,10 @@ class MainWindow(QMainWindow):
         items = self.api_equipment.get("items", [])
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and not item.get("equipped"):
-                rows.append([str(item.get("nameZh") or item.get("name") or item.get("displayName") or item.get("itemCode") or "物品"),
-                             str(item.get("slotType", "—")), str(item.get("qualityCode", "—")), str(item.get("quantity", 1))])
+                slot = str(item.get("slotType", "—"))
+                quality = str(item.get("qualityCode", "—"))
+                rows.append([localized_item_name(item), SLOT_NAMES_ZH.get(slot.upper(), slot),
+                             QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1))])
         for key, name in (("healthPotions", "生命药水"), ("bossTickets", "遗迹入场券"), ("atonementStones", "赎罪石")):
             count = self.last_self_state.get(key)
             if isinstance(count, (int, float)) and count > 0:
@@ -1898,7 +2312,7 @@ class MainWindow(QMainWindow):
             cache[encounter_id] = merged
             if encounter_id not in self.seen_monsters and int(merged.get("health", 0)) > 0:
                 self.seen_monsters.add(encounter_id)
-                self.append_log(f"发现怪物：{encounter_id} · {merged.get('monsterKey', '未知')} · 地图 {merged.get('mapId', '?')}")
+                self.append_log(f"发现怪物：{localized_monster_name(merged)} · {encounter_id[:8]} · 地图 {merged.get('mapId', '?')}")
         self.monsters = cache
         self.refresh_monster_table()
 
@@ -1920,7 +2334,7 @@ class MainWindow(QMainWindow):
             distance = self.monster_distance(monster)
             rank = str(monster.get("monsterRank", "")).upper()
             rank_label = {"NORMAL": "普通", "ELITE": "精英", "BOSS": "首领"}.get(rank, "未知")
-            values = [encounter_id, str(monster.get("monsterKey") or monster.get("name") or "怪物"), rank_label,
+            values = [encounter_id, localized_monster_name(monster), rank_label,
                       f"{hp}/{max_hp}" if max_hp is not None else str(hp),
                       f"({x}, {y})", f"{distance:.0f}" if math.isfinite(distance) else "—"]
             for col, value in enumerate(values):
@@ -2350,6 +2764,7 @@ class MainWindow(QMainWindow):
         if self.current_map == target:
             self.return_map_target = None
             self.travel_status.setText(f"已自动返回 {MAP_NAMES[target]}，按自动战斗选项继续。")
+            QTimer.singleShot(0, self.continue_quest_map_travel)
             return
         if self.pending_destination is not None:
             return
@@ -2389,8 +2804,10 @@ class MainWindow(QMainWindow):
     def send_travel(self, destination: int, attempt: int) -> None:
         if self.pending_destination != destination or self.travel_attempt != attempt:
             return
+        quest_id = (self.quest_map_quest_id if self.quest_map_target is not None
+                    else 0 if self.questless_farm_mode else self.quest_id.value())
         travel = {"action": "travel", "map": destination,
-                  "questId": self.quest_id.value(), "useTicket": self.use_ticket.isChecked(),
+                  "questId": quest_id or 0, "useTicket": self.use_ticket.isChecked(),
                   "movementRevision": self.movement_revision}
         try:
             self.send_game_packet(travel)

@@ -1,0 +1,296 @@
+[
+  {
+    "itemCode": "HELMETP1",
+    "equipmentLevel": 1,
+    "slotType": "HAT",
+    "nameEn": "Leather Cap",
+    "nameZh": "皮革帽"
+  },
+  {
+    "itemCode": "ARMORP1",
+    "equipmentLevel": 1,
+    "slotType": "ARMOR",
+    "nameEn": "Leather Tunic",
+    "nameZh": "皮革衣"
+  },
+  {
+    "itemCode": "BOOTSP1",
+    "equipmentLevel": 1,
+    "slotType": "SHOES",
+    "nameEn": "Leather Boots",
+    "nameZh": "皮革靴"
+  },
+  {
+    "itemCode": "SWORDP1",
+    "equipmentLevel": 1,
+    "slotType": "WEAPON",
+    "nameEn": "Iron Shortsword",
+    "nameZh": "铁短剑"
+  },
+  {
+    "itemCode": "SPEARP1",
+    "equipmentLevel": 1,
+    "slotType": "WEAPON",
+    "nameEn": "Wooden-Haft Spear",
+    "nameZh": "木柄长枪"
+  },
+  {
+    "itemCode": "RINGP1",
+    "equipmentLevel": 1,
+    "slotType": "RING",
+    "nameEn": "Copper Ring",
+    "nameZh": "铜戒"
+  },
+  {
+    "itemCode": "AMULETP1",
+    "equipmentLevel": 1,
+    "slotType": "AMULET",
+    "nameEn": "Fang Amulet",
+    "nameZh": "兽牙护符"
+  },
+  {
+    "itemCode": "HELMETP2",
+    "equipmentLevel": 2,
+    "slotType": "HAT",
+    "nameEn": "Iron Guard Helm",
+    "nameZh": "铁卫盔"
+  },
+  {
+    "itemCode": "ARMORP2",
+    "equipmentLevel": 2,
+    "slotType": "ARMOR",
+    "nameEn": "Iron Guard Armor",
+    "nameZh": "铁卫甲"
+  },
+  {
+    "itemCode": "BOOTSP2",
+    "equipmentLevel": 2,
+    "slotType": "SHOES",
+    "nameEn": "Iron Guard Boots",
+    "nameZh": "铁卫靴"
+  },
+  {
+    "itemCode": "SWORDP2",
+    "equipmentLevel": 2,
+    "slotType": "WEAPON",
+    "nameEn": "Iron Guard Sword",
+    "nameZh": "铁卫剑"
+  },
+  {
+    "itemCode": "SPEARP2",
+    "equipmentLevel": 2,
+    "slotType": "WEAPON",
+    "nameEn": "Iron Guard Spear",
+    "nameZh": "铁卫长枪"
+  },
+  {
+    "itemCode": "RINGP2",
+    "equipmentLevel": 2,
+    "slotType": "RING",
+    "nameEn": "Iron-Etched Ring",
+    "nameZh": "铁纹戒"
+  },
+  {
+    "itemCode": "AMULETP2",
+    "equipmentLevel": 2,
+    "slotType": "AMULET",
+    "nameEn": "Iron Guard Amulet",
+    "nameZh": "铁卫护符"
+  },
+  {
+    "itemCode": "HELMETP3",
+    "equipmentLevel": 3,
+    "slotType": "HAT",
+    "nameEn": "Steel Helm",
+    "nameZh": "钢铁盔"
+  },
+  {
+    "itemCode": "ARMORP3",
+    "equipmentLevel": 3,
+    "slotType": "ARMOR",
+    "nameEn": "Steel Battle Armor",
+    "nameZh": "钢铁战甲"
+  },
+  {
+    "itemCode": "BOOTSP3",
+    "equipmentLevel": 3,
+    "slotType": "SHOES",
+    "nameEn": "Steel War Boots",
+    "nameZh": "钢铁战靴"
+  },
+  {
+    "itemCode": "SWORDP3",
+    "equipmentLevel": 3,
+    "slotType": "WEAPON",
+    "nameEn": "Refined Steel Sword",
+    "nameZh": "精钢剑"
+  },
+  {
+    "itemCode": "SPEARP3",
+    "equipmentLevel": 3,
+    "slotType": "WEAPON",
+    "nameEn": "Refined Steel Spear",
+    "nameZh": "精钢长枪"
+  },
+  {
+    "itemCode": "RINGP3",
+    "equipmentLevel": 3,
+    "slotType": "RING",
+    "nameEn": "Silversteel Ring",
+    "nameZh": "银钢戒"
+  },
+  {
+    "itemCode": "AMULETP3",
+    "equipmentLevel": 3,
+    "slotType": "AMULET",
+    "nameEn": "Silver-Etched Amulet",
+    "nameZh": "银纹护符"
+  },
+  {
+    "itemCode": "HELMETP4",
+    "equipmentLevel": 4,
+    "slotType": "HAT",
+    "nameEn": "Black Iron Helm",
+    "nameZh": "黑铁盔"
+  },
+  {
+    "itemCode": "ARMORP4",
+    "equipmentLevel": 4,
+    "slotType": "ARMOR",
+    "nameEn": "Black Iron Heavy Armor",
+    "nameZh": "黑铁重甲"
+  },
+  {
+    "itemCode": "BOOTSP4",
+    "equipmentLevel": 4,
+    "slotType": "SHOES",
+    "nameEn": "Black Iron War Boots",
+    "nameZh": "黑铁战靴"
+  },
+  {
+    "itemCode": "SWORDP4",
+    "equipmentLevel": 4,
+    "slotType": "WEAPON",
+    "nameEn": "Blackedge Sword",
+    "nameZh": "黑锋剑"
+  },
+  {
+    "itemCode": "SPEARP4",
+    "equipmentLevel": 4,
+    "slotType": "WEAPON",
+    "nameEn": "Linebreaker Spear",
+    "nameZh": "破阵枪"
+  },
+  {
+    "itemCode": "RINGP4",
+    "equipmentLevel": 4,
+    "slotType": "RING",
+    "nameEn": "Obsidian Ring",
+    "nameZh": "黑曜戒"
+  },
+  {
+    "itemCode": "AMULETP4",
+    "equipmentLevel": 4,
+    "slotType": "AMULET",
+    "nameEn": "Obsidian Amulet",
+    "nameZh": "黑曜护符"
+  },
+  {
+    "itemCode": "HELMETP5",
+    "equipmentLevel": 5,
+    "slotType": "HAT",
+    "nameEn": "Mithril Crown",
+    "nameZh": "秘银冠"
+  },
+  {
+    "itemCode": "ARMORP5",
+    "equipmentLevel": 5,
+    "slotType": "ARMOR",
+    "nameEn": "Mithril Battle Armor",
+    "nameZh": "秘银战甲"
+  },
+  {
+    "itemCode": "BOOTSP5",
+    "equipmentLevel": 5,
+    "slotType": "SHOES",
+    "nameEn": "Mithril War Boots",
+    "nameZh": "秘银战靴"
+  },
+  {
+    "itemCode": "SWORDP5",
+    "equipmentLevel": 5,
+    "slotType": "WEAPON",
+    "nameEn": "Mithril Sword",
+    "nameZh": "秘银剑"
+  },
+  {
+    "itemCode": "SPEARP5",
+    "equipmentLevel": 5,
+    "slotType": "WEAPON",
+    "nameEn": "Mithril Spear",
+    "nameZh": "秘银长枪"
+  },
+  {
+    "itemCode": "RINGP5",
+    "equipmentLevel": 5,
+    "slotType": "RING",
+    "nameEn": "Mithril Ring",
+    "nameZh": "秘银戒"
+  },
+  {
+    "itemCode": "AMULETP5",
+    "equipmentLevel": 5,
+    "slotType": "AMULET",
+    "nameEn": "Moonlight Amulet",
+    "nameZh": "月辉护符"
+  },
+  {
+    "itemCode": "HELMETP6",
+    "equipmentLevel": 6,
+    "slotType": "HAT",
+    "nameEn": "Sovereign War Helm",
+    "nameZh": "王者战盔"
+  },
+  {
+    "itemCode": "ARMORP6",
+    "equipmentLevel": 6,
+    "slotType": "ARMOR",
+    "nameEn": "Sovereign Battle Armor",
+    "nameZh": "王者战甲"
+  },
+  {
+    "itemCode": "BOOTSP6",
+    "equipmentLevel": 6,
+    "slotType": "SHOES",
+    "nameEn": "Sovereign War Boots",
+    "nameZh": "王者战靴"
+  },
+  {
+    "itemCode": "SWORDP6",
+    "equipmentLevel": 6,
+    "slotType": "WEAPON",
+    "nameEn": "Sovereign Sword",
+    "nameZh": "王者之剑"
+  },
+  {
+    "itemCode": "SPEARP6",
+    "equipmentLevel": 6,
+    "slotType": "WEAPON",
+    "nameEn": "Sovereign War Spear",
+    "nameZh": "王者战枪"
+  },
+  {
+    "itemCode": "RINGP6",
+    "equipmentLevel": 6,
+    "slotType": "RING",
+    "nameEn": "Sovereign Ring",
+    "nameZh": "王者之戒"
+  },
+  {
+    "itemCode": "AMULETP6",
+    "equipmentLevel": 6,
+    "slotType": "AMULET",
+    "nameEn": "Sovereign Amulet",
+    "nameZh": "王者护符"
+  }
+]
