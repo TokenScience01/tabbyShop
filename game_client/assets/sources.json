@@ -1,0 +1,82 @@
+[
+  {
+    "file": "portrait.webp",
+    "source": ".godot/imported/portrait.png-cbf592191e785f7a585283783eef0f23.ctex",
+    "md5": "ca171e75895ddcae760b6f4345e7bb7a"
+  },
+  {
+    "file": "quest.webp",
+    "source": ".godot/imported/quest.png-360d6935eb3f3905a587d1606568d229.ctex",
+    "md5": "676d4e0d65b9771a119e52b5cee05444"
+  },
+  {
+    "file": "location.webp",
+    "source": ".godot/imported/location.png-ad94339e81ccffd34ec08fd3287a43a6.ctex",
+    "md5": "537acafe480a0546437f4a4578185183"
+  },
+  {
+    "file": "monster.webp",
+    "source": ".godot/imported/monster.png-c311cda94becf175a290650d372b7b8b.ctex",
+    "md5": "907584b642897ae940a41ea0a3103362"
+  },
+  {
+    "file": "amulet_p1.webp",
+    "source": "assets/weapons/equipment/armor/amulet_p1.png.import",
+    "md5": "48bc08d93270a00a6096fbe10fa01420"
+  },
+  {
+    "file": "amulet_p2.webp",
+    "source": "assets/weapons/equipment/armor/amulet_p2.png.import",
+    "md5": "e5881c35f98c0a7ede92bbc913987a45"
+  },
+  {
+    "file": "armor_p1.webp",
+    "source": "assets/weapons/equipment/armor/armor_p1.png.import",
+    "md5": "397d52cdc656a780d50493395782db97"
+  },
+  {
+    "file": "armor_p2.webp",
+    "source": "assets/weapons/equipment/armor/armor_p2.png.import",
+    "md5": "df77b38859a392ecb360b0927847f322"
+  },
+  {
+    "file": "boots_p1.webp",
+    "source": "assets/weapons/equipment/armor/boots_p1.png.import",
+    "md5": "27bb4c2062261bf0891c64b4dd474f43"
+  },
+  {
+    "file": "boots_p2.webp",
+    "source": "assets/weapons/equipment/armor/boots_p2.png.import",
+    "md5": "f9013e98fac0b59006950cf3a7c66f13"
+  },
+  {
+    "file": "helmet_p1.webp",
+    "source": "assets/weapons/equipment/armor/helmet_p1.png.import",
+    "md5": "691ce7cca4489bb985326297cefe1492"
+  },
+  {
+    "file": "helmet_p2.webp",
+    "source": "assets/weapons/equipment/armor/helmet_p2.png.import",
+    "md5": "a1a3581511a116be6ea1e414d82fff4b"
+  },
+  {
+    "file": "ring_p1.webp",
+    "source": "assets/weapons/equipment/armor/ring_p1.png.import",
+    "md5": "af914076d1de99b7517908dba1f19884"
+  },
+  {
+    "file": "ring_p2.webp",
+    "source": "assets/weapons/equipment/armor/ring_p2.png.import",
+    "md5": "535f2f2e231e374386052578f1a8620b"
+  },
+  {
+    "file": "sword_p1.webp",
+    "source": "assets/weapons/equipment/weapons/sword_p1.png.import",
+    "md5": "fcd28c36318ae03d58b7c33caf582565"
+  },
+  {
+    "file": "sword_p2.webp",
+    "source": "assets/weapons/equipment/weapons/sword_p2.png.import",
+    "md5": "acce4df777ec17b102b63a4551d65545"
+  }
+]

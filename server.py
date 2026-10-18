@@ -222,6 +222,8 @@ class ShopMonitor:
         self.lock = threading.RLock()
         self.wake = threading.Event()
         persisted = self._load()
+        if os.environ.get("TABBY_SAFE_START") == "1":
+            persisted = dict(persisted, enabled=False, autoBuyEnabled=False)
         self.config = normalized_config(persisted.get("config", DEFAULT_CONFIG))
         self.enabled = bool(persisted.get("enabled", False))
         self.status = "starting" if self.enabled else "stopped"

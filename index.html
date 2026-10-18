@@ -36,10 +36,18 @@
       let productList = [], productPage = 0, lastProductRevision = -1, hydrating = true;
       const pageSize = 30, slotNames = {WEAPON:'武器',ARMOR:'护甲',SHOES:'鞋子',RING:'戒指',AMULET:'护符',HAT:'头盔',OTHER:'其他'};
 
-      const savedToken = localStorage.getItem('tabby_shop_token');
+      const desktopMode = window.__TABBY_DESKTOP__ === true;
+      if (desktopMode) {
+        token.readOnly = true;
+        token.placeholder = '通过桌面右上角「账号连接」统一设置';
+        $('saveToggle').disabled = true;
+        $('saveToggle').classList.remove('on');
+        document.querySelector('.helper').textContent = 'Token 与游戏控制台共用，仅保存在整合程序内存中。';
+      }
+      const savedToken = desktopMode ? '' : localStorage.getItem('tabby_shop_token');
       if (savedToken) token.value = savedToken;
       fetch('./config.local.json', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(c => {
-        if (c?.token && !token.value) token.value = c.token;
+        if (!desktopMode && c?.token && !token.value) token.value = c.token;
       }).catch(() => {});
       const stored = localStorage.getItem('tabby_shop_settings');
       if (stored) try {
@@ -79,7 +87,7 @@
       }
       function save() {
         remember = $('saveToggle').classList.contains('on');
-        if (remember && token.value.trim()) localStorage.setItem('tabby_shop_token', token.value.trim());
+        if (!desktopMode && remember && token.value.trim()) localStorage.setItem('tabby_shop_token', token.value.trim());
         else localStorage.removeItem('tabby_shop_token');
         localStorage.setItem('tabby_shop_settings', JSON.stringify({interval:intervalInput.value,concurrency:concurrencyInput.value,remember}));
       }
