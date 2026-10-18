@@ -16,7 +16,7 @@ sys.path.insert(0, str(BASE_DIR / 'game_client'))
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QLabel, QPushButton, QTabWidget,
-                              QDialog, QLineEdit)
+                              QDialog)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from wss_tester import MainWindow as GameWindow
@@ -80,12 +80,24 @@ class DesktopWindow(QMainWindow):
         self.account_dialog.setWindowTitle('统一账号连接')
         self.account_dialog.setMinimumWidth(520)
         account_layout = QVBoxLayout(self.account_dialog)
-        account_layout.addWidget(QLabel('游戏与商城共用 Token，仅保存在整合程序内存中。'))
-        self.account_token = QLineEdit()
-        self.account_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.account_token.setPlaceholderText('粘贴 Token，可包含 Bearer 前缀')
-        self.account_token.textChanged.connect(self.game.token.setText)
-        account_layout.addWidget(self.account_token)
+        account_layout.addWidget(QLabel('选择 Token 登录，或用 BSC 私钥在本机签名登录。'))
+        account_layout.addWidget(QLabel('登录方式'))
+        account_layout.addWidget(self.game.auth_method)
+        self.account_token_label = QLabel('游戏会话 Token')
+        account_layout.addWidget(self.account_token_label)
+        account_layout.addWidget(self.game.token)
+        # Retain the familiar desktop account field reference for tests and
+        # integrations while sharing the actual game login widget.
+        self.account_token = self.game.token
+        self.account_private_key_label = QLabel('BSC 钱包私钥（仅本机签名，不会保存）')
+        account_layout.addWidget(self.account_private_key_label)
+        account_layout.addWidget(self.game.private_key)
+        self.account_sign_help = QLabel(
+            '签名流程：POST /membership/challenge → /membership/verify → /membership/enter'
+        )
+        account_layout.addWidget(self.account_sign_help)
+        self.game.auth_method.currentIndexChanged.connect(self.update_account_auth_fields)
+        self.update_account_auth_fields()
         row = QHBoxLayout()
         connect = QPushButton('连接游戏')
         connect.clicked.connect(self.game.connect_ws)
@@ -106,14 +118,21 @@ class DesktopWindow(QMainWindow):
     def show_account(self):
         self.account_dialog.show()
         self.account_dialog.raise_()
-        self.account_token.setFocus()
+        if self.game.auth_method.currentData() == 'private_key':
+            self.game.private_key.setFocus()
+        else:
+            self.game.token.setFocus()
+
+    def update_account_auth_fields(self, *_args):
+        private_mode = self.game.auth_method.currentData() == 'private_key'
+        self.account_token_label.setVisible(not private_mode)
+        self.account_private_key_label.setVisible(private_mode)
+        self.account_sign_help.setVisible(private_mode)
 
     def set_token(self, value):
         value = value.strip()
         self._token = value[7:].strip() if value.lower().startswith('bearer ') else value
         self.account_status.setText('Token 已设置' if self._token else '未设置 Token')
-        if self.account_token.text() != value:
-            self.account_token.setText(value)
         self.sync_shop_token()
 
     def sync_shop_token(self):
