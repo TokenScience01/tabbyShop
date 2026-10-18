@@ -1,1 +1,20 @@
 config.local.json
+monitor.local.json
+
+# Local IDE settings
+.idea/
+
+# Python runtime/cache files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS metadata
+.DS_Store
+
+# Windows executable build outputs
+.build-venv/
+build/
+dist/
+*.spec

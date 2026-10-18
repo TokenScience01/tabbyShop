@@ -11,8 +11,9 @@
   <style>
     :root{color-scheme:dark;--bg:#10120f;--surface:#171a16;--surface2:#1c201b;--line:#2a3028;--muted:#8d9589;--text:#f1f3ed;--accent:#d4f36a;--accent-dim:#28331c;--red:#ff7a70;--green:#a7e58e;--mono:'DM Mono',monospace;--sans:Manrope,'Noto Sans SC',sans-serif}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 75% -15%,#27301e 0,transparent 36%),var(--bg);color:var(--text);font:14px var(--sans);min-height:100vh}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.shell{max-width:1440px;margin:auto;padding:28px 42px 50px}.topbar{height:42px;display:flex;align-items:center;justify-content:space-between;margin-bottom:60px}.brand{display:flex;align-items:center;gap:11px;font-weight:800;letter-spacing:-.5px}.brandmark{width:32px;height:32px;border-radius:10px;background:var(--accent);display:grid;place-items:center;color:#14170d}.brandmark svg{width:20px}.brand small{display:block;color:var(--muted);font:10px var(--mono);letter-spacing:1.5px;margin-top:2px}.top-right{display:flex;align-items:center;gap:18px;color:var(--muted);font:11px var(--mono)}.secure{display:flex;gap:7px;align-items:center}.secure svg{width:14px;color:var(--accent)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:33px}.eyebrow{color:var(--accent);font:11px var(--mono);letter-spacing:2px;text-transform:uppercase;display:flex;align-items:center;gap:9px;margin-bottom:14px}.eyebrow:before{content:'';width:18px;height:1px;background:var(--accent)}h1{font-size:clamp(34px,4vw,54px);line-height:1.06;letter-spacing:-2.8px;margin:0 0 12px;font-weight:700}.subtitle{color:var(--muted);margin:0;font-size:14px}.hero-right{display:flex;align-items:center;gap:10px}.button{border:1px solid var(--line);background:#1c201b;color:var(--text);padding:11px 16px;border-radius:8px;display:inline-flex;align-items:center;gap:9px;font-size:12px;font-weight:700;transition:background .2s,border-color .2s,color .2s}.button:hover{border-color:#515b4a;background:#242a21}.button svg{width:15px;height:15px}.button.primary{background:var(--accent);border-color:var(--accent);color:#171b10;padding:12px 18px}.button.primary:hover{background:#e1ff85}.button.primary.running{background:#282f22;color:var(--accent);border-color:#485239}.button:disabled{opacity:.55;cursor:not-allowed}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}.metric{background:linear-gradient(140deg,#1a1d19,#161915);border:1px solid var(--line);border-radius:11px;padding:18px 20px;min-height:112px;position:relative;overflow:hidden}.metric:after{content:'';height:1px;width:70px;position:absolute;top:0;left:20px;background:#6f824b}.metric-label{color:var(--muted);font-size:11px;letter-spacing:.4px;display:flex;align-items:center;gap:7px}.metric-icon{color:#a3af96;display:inline-flex}.metric-icon svg{width:14px;height:14px}.metric-value{font:500 25px var(--mono);letter-spacing:-1.3px;margin-top:12px}.metric-value small{font:11px var(--sans);color:var(--muted);letter-spacing:0;margin-left:6px}.metric-sub{font:10px var(--mono);color:#6f786a;margin-top:5px}.workbench{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,.85fr);gap:16px}.panel{background:var(--surface);border:1px solid var(--line);border-radius:11px;overflow:hidden}.panel-head{padding:17px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.panel-title{font-weight:700;font-size:13px;display:flex;align-items:center;gap:9px}.panel-title svg{width:16px;color:var(--accent)}.panel-note{font:10px var(--mono);color:var(--muted)}.settings{padding:20px}.field-label{color:#bdc3b7;font-size:11px;font-weight:600;margin:0 0 8px;display:block}.token-wrap{position:relative}.token-wrap input,.input{width:100%;background:#10120f;border:1px solid #30362d;border-radius:7px;color:var(--text);padding:11px 42px 11px 12px;font:11px var(--mono)}input::placeholder{color:#687064}.token-wrap button{position:absolute;right:7px;top:7px;border:0;background:transparent;color:#8d9589;padding:4px}.token-wrap button svg{width:16px;height:16px}.helper{font-size:10px;color:#788174;margin-top:8px;line-height:1.6}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:20px}.input{padding:10px 11px}.input-row{position:relative}.input-row .unit{position:absolute;right:11px;top:10px;color:#798174;font:10px var(--mono)}.url-row{margin-top:20px}.url-view{font:10px var(--mono);color:#a5ad9d;background:#10120f;border:1px solid #30362d;border-radius:7px;padding:11px 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-footer{border-top:1px solid var(--line);padding-top:16px;margin-top:20px;display:flex;justify-content:space-between;align-items:center;gap:10px}.auto-label{font-size:11px;color:#bdc3b7;display:flex;align-items:center;gap:9px}.switch{width:31px;height:18px;border:0;border-radius:20px;background:#3b4238;position:relative;padding:0;transition:background .2s}.switch:before{content:'';position:absolute;left:3px;top:3px;width:12px;height:12px;background:#b8c0b2;border-radius:50%;transition:transform .2s}.switch.on{background:#748a43}.switch.on:before{transform:translateX(13px);background:#f2f8e8}.right-stack{display:flex;flex-direction:column;gap:16px}.activity{min-height:239px}.activity-body{padding:3px 20px 10px}.activity-row{display:grid;grid-template-columns:19px 1fr auto;gap:10px;align-items:start;padding:13px 0;border-bottom:1px solid #252a23}.activity-row:last-child{border:0}.status-dot{width:7px;height:7px;border-radius:50%;background:#616a5c;margin:5px 0 0 4px}.status-dot.ok{background:var(--green);box-shadow:0 0 8px #a7e58e55}.status-dot.fail{background:var(--red)}.activity-main{font-size:11px;color:#d9ded4}.activity-meta{color:#778073;font:9px var(--mono);margin-top:5px}.activity-code{font:10px var(--mono);color:var(--green)}.activity-code.fail{color:var(--red)}.empty{padding:33px 8px;color:#778073;text-align:center;font-size:11px;line-height:1.7}.response{min-height:211px}.response-body{padding:14px 18px}.response-toolbar{display:flex;justify-content:space-between;color:#798174;font:9px var(--mono);margin-bottom:11px}.response pre{margin:0;color:#b9c3ae;font:10px/1.65 var(--mono);white-space:pre-wrap;overflow:auto;max-height:140px}.response .key{color:#c2de82}.pulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:6px;box-shadow:0 0 8px #d4f36a88;animation:pulse 2s infinite}@keyframes pulse{50%{opacity:.4}}.footnote{color:#60695d;font:9px var(--mono);margin-top:20px;display:flex;justify-content:space-between}.toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,20px);opacity:0;background:#242a21;border:1px solid #46513a;color:var(--text);padding:11px 16px;border-radius:8px;font-size:12px;transition:.25s;pointer-events:none}.toast.show{opacity:1;transform:translate(-50%,0)}
+    .flash-panel{margin:0 0 16px;border-color:#485337}.flash-panel .panel-head{background:linear-gradient(90deg,#20271a,#171a16)}.flash-body{padding:18px 20px;display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) auto;gap:18px;align-items:end}.flash-description{font-size:11px;color:#929b8c;line-height:1.7;align-self:center}.flash-description strong{color:var(--accent);font-weight:700}.flash-fields{display:grid;grid-template-columns:repeat(3,minmax(90px,1fr));gap:9px}.quality-options{display:flex;flex-wrap:nowrap;gap:6px;align-items:center;white-space:nowrap}.flash-field:has(.quality-options){grid-column:1/-1}.quality-options .quality-choice{flex:0 0 auto}.quality-choice{display:inline-flex;align-items:center;gap:0;min-width:44px;border:1px solid #343b30;background:#10120f;border-radius:6px;padding:7px 9px;color:#d1d8ca;font:10px var(--mono);cursor:pointer}.quality-choice span{margin-left:8px}.quality-choice:has(input:checked){border-color:#788b4b;color:var(--accent);background:#22291b}.quality-choice input[type=checkbox]{appearance:none;-webkit-appearance:none;display:inline-grid;place-content:center;box-sizing:border-box;width:10px;min-width:10px;height:10px;min-height:10px;flex:0 0 10px;margin:0;padding:0;border:1px solid #73796e;border-radius:2px;background:#262a24;color:#20241a;cursor:pointer}.quality-choice input[type=checkbox]:checked{border-color:var(--accent);background:var(--accent)}.quality-choice input[type=checkbox]:checked:after{content:'';width:4px;height:6px;border:solid #20241a;border-width:0 1.5px 1.5px 0;transform:rotate(45deg) translate(-.5px,-.5px)}.quality-choice input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.key-import{display:flex;gap:6px;margin-top:8px}.key-import input{min-width:0;width:100%;background:#10120f;border:1px solid #30362d;border-radius:7px;color:var(--text);padding:8px 9px;font:10px var(--mono)}.key-import button{border:1px solid var(--line);background:#1c201b;color:var(--text);border-radius:6px;padding:7px 9px;font-size:10px;white-space:nowrap}.flash-field label{display:block;color:#aab2a3;font-size:10px;margin-bottom:6px}.flash-field input:not([type=checkbox]),.flash-field select{width:100%;height:35px;background:#10120f;border:1px solid #30362d;border-radius:7px;color:#f1f3ed;padding:0 10px;font:11px var(--mono)}.flash-field select{cursor:pointer}.wallet-status{font:10px var(--mono);color:#929b8c;overflow-wrap:anywhere;margin-top:9px}.flash-actions{display:flex;gap:8px;align-items:center}.button.wallet{padding:10px 12px;font-size:10px}.button.auto{background:var(--accent);border-color:var(--accent);color:#171b10;white-space:nowrap}.button.auto.active{background:#282f22;color:var(--accent);border-color:#485239}.flash-status{grid-column:1/-1;padding-top:12px;border-top:1px solid #2a3028;color:#aab2a3;font-size:10px;line-height:1.6}.flash-status.active{color:var(--accent)}.flash-status.error{color:var(--red)}
     .catalog{margin-top:16px}.catalog-tools{padding:15px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line)}.catalog-search{flex:1;min-width:190px;position:relative}.catalog-search svg{width:15px;position:absolute;left:11px;top:11px;color:#7c8577}.catalog-search input,.catalog-tools select{height:36px;background:#10120f;border:1px solid #30362d;border-radius:7px;color:#e5e9df;padding:0 11px;font-size:11px}.catalog-search input{width:100%;padding-left:34px}.catalog-tools select{min-width:115px;cursor:pointer}.catalog-count{margin-left:auto;color:#8d9589;font:10px var(--mono);white-space:nowrap}.table-wrap{overflow:auto}.products-table{width:100%;border-collapse:collapse;min-width:760px}.products-table th{text-align:left;color:#788174;font:9px var(--mono);letter-spacing:.8px;padding:12px 16px;background:#141713;border-bottom:1px solid var(--line)}.products-table td{padding:13px 16px;border-bottom:1px solid #252a23;font-size:11px;vertical-align:middle}.products-table tbody tr:hover{background:#1b1f19}.product-name{font-weight:700;color:#e7ebdf}.product-meta{font:9px var(--mono);color:#788174;margin-top:4px}.quality{display:inline-flex;align-items:center;gap:6px;border:1px solid #41483c;border-radius:20px;padding:4px 8px;color:#d5dccd;font:9px var(--mono)}.quality-dot{width:6px;height:6px;border-radius:50%;background:#fff}.quality.l2{color:#69b3ff;border-color:#31516a}.quality.l2 .quality-dot{background:#5aa9ff}.quality.l3{color:#c994ff;border-color:#543a6a}.quality.l3 .quality-dot{background:#b56cff}.quality.l4{color:#ffcf72;border-color:#66542c}.quality.l4 .quality-dot{background:#e6b84e}.slot-tag{color:#a4ad9d;font:9px var(--mono)}.attributes{color:#adb5a7;line-height:1.6;max-width:270px}.price{font:500 12px var(--mono);color:var(--accent);white-space:nowrap}.seller{font:10px var(--mono);color:#939c8d}.pagination{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;color:#7d8678;font:10px var(--mono)}.page-buttons{display:flex;gap:7px}.page-buttons button{background:#1c201b;border:1px solid var(--line);color:#dce2d6;border-radius:6px;padding:6px 10px;font-size:10px}.page-buttons button:hover:not(:disabled){border-color:#59664b}.page-buttons button:disabled{opacity:.4;cursor:default}
-    @media(max-width:900px){.shell{padding:24px}.hero{align-items:flex-start;flex-direction:column}.hero-right{align-self:flex-start}.workbench{grid-template-columns:1fr}.right-stack{display:grid;grid-template-columns:1fr 1fr}.metrics{grid-template-columns:repeat(2,1fr)}}@media(max-width:600px){.shell{padding:17px}.topbar{margin-bottom:42px}.top-right .secure{display:none}.hero-right{width:100%}.hero-right .button{flex:1;justify-content:center}.metrics{gap:8px}.metric{padding:15px;min-height:100px}.metric-value{font-size:21px}.right-stack{grid-template-columns:1fr}.settings-grid{gap:10px}.settings-footer{align-items:flex-start;flex-direction:column}.settings-footer .button{width:100%;justify-content:center}.footnote{flex-direction:column;gap:6px}.catalog-tools select{flex:1}.catalog-count{margin-left:0;width:100%}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+    @media(max-width:900px){.shell{padding:24px}.hero{align-items:flex-start;flex-direction:column}.hero-right{align-self:flex-start}.workbench{grid-template-columns:1fr}.right-stack{display:grid;grid-template-columns:1fr 1fr}.metrics{grid-template-columns:repeat(2,1fr)}.flash-body{grid-template-columns:1fr 1fr}.flash-description{grid-column:1/-1}.flash-actions{grid-column:1/-1;justify-content:flex-end}}@media(max-width:600px){.quality-options{flex-wrap:wrap}.flash-field:has(.quality-options){grid-column:auto}.shell{padding:17px}.topbar{margin-bottom:42px}.top-right .secure{display:none}.hero-right{width:100%}.hero-right .button{flex:1;justify-content:center}.metrics{gap:8px}.metric{padding:15px;min-height:100px}.metric-value{font-size:21px}.right-stack{grid-template-columns:1fr}.settings-grid{gap:10px}.settings-footer{align-items:flex-start;flex-direction:column}.settings-footer .button{width:100%;justify-content:center}.footnote{flex-direction:column;gap:6px}.catalog-tools select{flex:1}.catalog-count{margin-left:0;width:100%}.flash-body{grid-template-columns:1fr}.flash-description,.flash-actions,.flash-status{grid-column:1}.flash-fields{grid-template-columns:repeat(2,1fr)}.flash-actions{flex-direction:column;align-items:stretch}.flash-actions .button{justify-content:center}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
   </style>
 </head>
 <body>
@@ -20,40 +21,289 @@
     <header class="topbar"><div class="brand"><div class="brandmark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 18V6h3.2l3.8 5 3.8-5H19v12h-3V10.7l-4 5-4-5V18H5Z" fill="currentColor"/></svg></div><div>tabby<span style="color:var(--accent)">shop</span><small>LIVE MONITOR</small></div></div><div class="top-right"><span class="secure"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3"/></svg>本地安全存储</span><span id="clock">--:--:--</span></div></header>
     <section class="hero"><div><div class="eyebrow">SHOP API · CONTROL CENTER</div><h1>商城实时监控</h1><p class="subtitle">持续扫描商品数据，第一时间掌握库存与接口状态。</p></div><div class="hero-right"><button class="button" id="onceBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.5"/><path d="M4 4v4.5h4.5"/></svg>立即刷新</button><button class="button primary" id="toggleBtn" type="button"><svg id="toggleIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg><span id="toggleText">开始监控</span></button></div></section>
     <section class="metrics" aria-label="监控统计"><article class="metric"><div class="metric-label"><span class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3h2l2.2 12.1a2 2 0 0 0 2 1.6h8.9a2 2 0 0 0 2-1.6L22 8H6"/><circle cx="10" cy="21" r="1"/><circle cx="18" cy="21" r="1"/></svg></span>商品条目</div><div class="metric-value" id="products">—</div><div class="metric-sub">当前响应中的商品数</div></article><article class="metric"><div class="metric-label"><span class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg></span>扫描总数</div><div class="metric-value" id="scans">0</div><div class="metric-sub">本次会话已完成请求</div></article><article class="metric"><div class="metric-label"><span class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg></span>最近响应</div><div class="metric-value" id="latency">—<small>ms</small></div><div class="metric-sub">最近一次请求耗时</div></article><article class="metric"><div class="metric-label"><span class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 12.5 9.5 18 20 6"/></svg></span>接口状态</div><div class="metric-value" id="apiStatus" style="font-size:19px">待连接</div><div class="metric-sub" id="lastUpdated">尚未请求</div></article></section>
-    <section class="workbench"><article class="panel"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.4.8l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.4-.8l-1.7.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-1.7l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.4-.8l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.4.8l1.7-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.6Z" transform="translate(-1 -1)"/></svg>扫描配置</div><div class="panel-note">REQUEST SETTINGS</div></div><div class="settings"><label class="field-label" for="token">Bearer Token</label><div class="token-wrap"><input id="token" type="password" placeholder="粘贴 API token（不含 Bearer 前缀）" autocomplete="off" /><button id="revealBtn" type="button" aria-label="显示或隐藏 token"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div><div class="helper">Token 只保存在此浏览器的本地存储中，不会写入项目源码。</div><div class="settings-grid"><div><label class="field-label" for="interval">扫描间隔</label><div class="input-row"><input id="interval" class="input" type="number" min="5" max="3600" value="5" /><span class="unit">秒</span></div></div><div><label class="field-label" for="concurrency">并发线程</label><div class="input-row"><input id="concurrency" class="input" type="number" min="1" max="20" value="3" /><span class="unit">路</span></div></div></div><div class="url-row"><span class="field-label">请求地址</span><div class="url-view">https://game.tabby.meme/api/shop</div></div><div class="settings-footer"><div class="auto-label"><button class="switch on" id="saveToggle" role="switch" aria-checked="true" aria-label="记住 token"></button><span>在此设备记住 Token</span></div><button class="button" id="clearLog" type="button">清空记录</button></div></div></article>
+    <section class="panel flash-panel" aria-label="秒购设置"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 2 4 14h7l-1 8 10-13h-7l1-7Z"/></svg>秒购 · BSC</div><div class="panel-note">本地钥匙串签名</div></div><div class="flash-body"><div class="flash-description">自动筛选所选品质和价格范围。命中后服务端创建订单报价并自动签名提交。默认单次最多购买 1 件。</div><div class="flash-fields"><div class="flash-field"><label>商品品质（可多选）</label><div class="quality-options" id="buyQualities"><label class="quality-choice"><input type="checkbox" value="L1"><span>L1</span></label><label class="quality-choice"><input type="checkbox" value="L2"><span>L2</span></label><label class="quality-choice"><input type="checkbox" value="L3" checked><span>L3</span></label><label class="quality-choice"><input type="checkbox" value="L4"><span>L4</span></label></div></div><div class="flash-field"><label for="buyMinPrice">最低单价 (≥)</label><input id="buyMinPrice" type="number" min="0" step="0.01" value="0" /></div><div class="flash-field"><label for="buyMaxPrice">最高单价 (&lt;)</label><input id="buyMaxPrice" type="number" min="0.01" step="0.01" value="200" /></div><div class="flash-field"><label for="buyBudget">本次总预算</label><input id="buyBudget" type="number" min="0.01" step="0.01" value="200" /></div><div class="flash-field"><label for="buyMaxCount">最多购买件数</label><input id="buyMaxCount" type="number" min="1" max="10" step="1" value="1" /></div></div><div><div class="flash-actions"><button class="button wallet" id="walletBtn" type="button">导入私钥</button><button class="button auto" id="autoBuyBtn" type="button">启动秒购</button></div><div class="key-import"><input id="privateKey" type="password" autocomplete="off" placeholder="私钥仅保存到系统钥匙串"><button id="clearKeyBtn" type="button" hidden>移除</button></div><div class="wallet-status" id="walletStatus">尚未导入签名账户</div></div><div class="flash-status" id="buyStatus" role="status" aria-live="polite">启动秒购后，后台会按筛选条件自动签名并提交交易。请只导入专用小额钱包。</div></div></section>
+    <section class="workbench"><article class="panel"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.4.8l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.4-.8l-1.7.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-1.7l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.4-.8l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.4.8l1.7-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.6Z" transform="translate(-1 -1)"/></svg>扫描配置</div><div class="panel-note">REQUEST SETTINGS</div></div><div class="settings"><label class="field-label" for="token">Bearer Token</label><div class="token-wrap"><input id="token" type="password" placeholder="粘贴 API token（不含 Bearer 前缀）" autocomplete="off" /><button id="revealBtn" type="button" aria-label="显示或隐藏 token"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div><div class="helper">启动监控时 Token 会保存到本机忽略文件，服务端扫描直接读取。</div><div class="settings-grid"><div><label class="field-label" for="interval">扫描间隔</label><div class="input-row"><input id="interval" class="input" type="number" min="5" max="3600" value="5" /><span class="unit">秒</span></div></div><div><label class="field-label" for="concurrency">并发线程</label><div class="input-row"><input id="concurrency" class="input" type="number" min="1" max="20" value="3" /><span class="unit">路</span></div></div></div><div class="url-row"><span class="field-label">请求地址</span><div class="url-view">https://game.tabby.meme/api/shop</div></div><div class="settings-footer"><div class="auto-label"><button class="switch on" id="saveToggle" role="switch" aria-checked="true" aria-label="记住 token"></button><span>在此设备记住 Token</span></div><button class="button" id="clearLog" type="button">清空记录</button></div></div></article>
     <div class="right-stack"><article class="panel activity"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 19V5M4 19h17M7 15l4-4 3 2 6-7"/></svg>扫描记录</div><div class="panel-note" id="recordCount">0 EVENTS</div></div><div class="activity-body" id="activity"><div class="empty">准备就绪<br/>启动监控后，请求记录会显示在这里</div></div></article><article class="panel response"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v14H4zM8 9l2 2-2 2m4 0h4"/></svg>最近响应</div><div class="panel-note"><span class="pulse"></span>LIVE DATA</div></div><div class="response-body"><div class="response-toolbar"><span id="responseStatus">等待首次请求</span><span id="responseSize">JSON</span></div><pre id="response"><span style="color:#66705f">// 响应内容将在这里呈现</span></pre></div></article></div></section>
     <section class="panel catalog" aria-label="商城商品"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v13H4zM8 7V5a4 4 0 0 1 8 0v2M4 11h16"/></svg>商城商品</div><div class="panel-note" id="catalogUpdated">等待商城数据</div></div><div class="catalog-tools"><label class="catalog-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg><input id="productSearch" type="search" placeholder="搜索名称、编号或卖家" aria-label="搜索商品" /></label><select id="qualityFilter" aria-label="按品质筛选"><option value="">全部品质</option></select><select id="slotFilter" aria-label="按部位筛选"><option value="">全部部位</option></select><select id="sortFilter" aria-label="排序商品"><option value="newest">最新上架</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option></select><span class="catalog-count" id="catalogCount">0 件商品</span></div><div class="table-wrap"><table class="products-table"><thead><tr><th>商品</th><th>品质</th><th>部位</th><th>属性</th><th>卖家</th><th>价格</th></tr></thead><tbody id="productRows"><tr><td colspan="6"><div class="empty">点击「立即刷新」获取商品列表</div></td></tr></tbody></table></div><div class="pagination"><span id="pageInfo">等待数据</span><div class="page-buttons"><button id="prevPage" type="button" disabled>上一页</button><button id="nextPage" type="button" disabled>下一页</button></div></div></section>
-    <footer class="footnote"><span>API ENDPOINT · GAME.TABBY.MEME</span><span>请求仅在你点击开始后发送</span></footer>
+    <footer class="footnote"><span>API ENDPOINT · GAME.TABBY.MEME</span><span>服务端按配置持续扫描；关闭页面不影响监控</span></footer>
   </main><div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>
-    (()=>{
-      const $=id=>document.getElementById(id), token=$('token'), intervalInput=$('interval'), concurrencyInput=$('concurrency');
-      let timer=null, busy=false, scans=0, events=[], remember=true, lastData=null;
-      const endpoint='https://game.tabby.meme/api/shop';
-      const savedToken=localStorage.getItem('tabby_shop_token'); if(savedToken) token.value=savedToken;
-      // Optional local-only credentials file; keep it out of version control.
-      fetch('./config.local.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(c=>{if(c?.token&&!token.value)token.value=c.token}).catch(()=>{});
-      const stored=localStorage.getItem('tabby_shop_settings'); if(stored){try{const s=JSON.parse(stored);intervalInput.value=s.interval||5;concurrencyInput.value=s.concurrency||3;remember=s.remember!==false}catch{}}
+    (() => {
+      const $ = id => document.getElementById(id);
+      const token = $('token'), intervalInput = $('interval'), concurrencyInput = $('concurrency');
+      let serverMonitorEnabled = false, stateTimer = null, busy = false, scans = 0, events = [], remember = true;
+      let walletAddress = '', autoBuyActive = false;
+      let productList = [], productPage = 0, lastProductRevision = -1, hydrating = true;
+      const pageSize = 30, slotNames = {WEAPON:'武器',ARMOR:'护甲',SHOES:'鞋子',RING:'戒指',AMULET:'护符',HAT:'头盔',OTHER:'其他'};
+
+      const savedToken = localStorage.getItem('tabby_shop_token');
+      if (savedToken) token.value = savedToken;
+      fetch('./config.local.json', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(c => {
+        if (c?.token && !token.value) token.value = c.token;
+      }).catch(() => {});
+      const stored = localStorage.getItem('tabby_shop_settings');
+      if (stored) try {
+        const s = JSON.parse(stored);
+        intervalInput.value = s.interval || 5;
+        concurrencyInput.value = s.concurrency || 3;
+        remember = s.remember !== false;
+      } catch {}
+      try {
+        const settings = JSON.parse(localStorage.getItem('tabby_shop_buy_settings') || '{}');
+        applyQualities(settings.qualities || (settings.quality ? [settings.quality] : ['L3']));
+        $('buyMinPrice').value = Math.max(0, Number(settings.minPrice) || 0);
+        $('buyMaxPrice').value = Math.max(Number($('buyMinPrice').value)+0.01, Number(settings.maxPrice ?? settings.priceLimit) || 200);
+        $('buyBudget').value = Math.max(0.01, Number(settings.budget) || 200);
+        $('buyMaxCount').value = Math.max(1, Math.min(10, Number(settings.maxCount) || 1));
+      } catch {}
       updateSwitch();
-      function toast(msg){const el=$('toast');el.textContent=msg;el.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.remove('show'),2400)}
-      function save(){remember=$('saveToggle').classList.contains('on');if(remember&&token.value.trim())localStorage.setItem('tabby_shop_token',token.value.trim());else localStorage.removeItem('tabby_shop_token');localStorage.setItem('tabby_shop_settings',JSON.stringify({interval:intervalInput.value,concurrency:concurrencyInput.value,remember}))}
-      function updateSwitch(){$('saveToggle').classList.toggle('on',remember);$('saveToggle').setAttribute('aria-checked',String(remember))}
-      function time(){return new Date().toLocaleTimeString('zh-CN',{hour12:false})}
-      function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-      function renderEvents(){ $('recordCount').textContent=`${events.length} EVENTS`; if(!events.length){$('activity').innerHTML='<div class="empty">准备就绪<br/>启动监控后，请求记录会显示在这里</div>';return} $('activity').innerHTML=events.slice(0,7).map(e=>`<div class="activity-row"><span class="status-dot ${e.ok?'ok':'fail'}"></span><div><div class="activity-main">${e.ok?'商城数据刷新成功':'请求失败'}</div><div class="activity-meta">${e.time} · ${e.duration} ms · ${e.label}</div></div><span class="activity-code ${e.ok?'':'fail'}">${e.status}</span></div>`).join('') }
-      function countProducts(data){if(Array.isArray(data))return data.length;if(!data||typeof data!=='object')return null;for(const k of ['products','items','shop','data','goods'])if(k in data){const n=countProducts(data[k]);if(n!==null)return n}return null}
-      let productList=[], productPage=0; const pageSize=30;
-      const slotNames={WEAPON:'武器',ARMOR:'护甲',SHOES:'鞋子',RING:'戒指',AMULET:'护符',HAT:'头盔',OTHER:'其他'};
-      function renderCatalog(data){if(!data||!Array.isArray(data.products))return;productList=data.products;const selectedQuality=$('qualityFilter').value,selectedSlot=$('slotFilter').value;const qualities=[...new Set(productList.map(p=>p.qualityCode).filter(Boolean))].sort((a,b)=>Number(a.slice(1))-Number(b.slice(1)));const slots=[...new Set(productList.map(p=>p.slotType).filter(Boolean))].sort();$('qualityFilter').innerHTML='<option value="">全部品质</option>'+qualities.map(q=>`<option value="${esc(q)}">${esc(q)} 品质</option>`).join('');$('slotFilter').innerHTML='<option value="">全部部位</option>'+slots.map(s=>`<option value="${esc(s)}">${esc(slotNames[s]||s)}</option>`).join('');$('qualityFilter').value=qualities.includes(selectedQuality)?selectedQuality:'';$('slotFilter').value=slots.includes(selectedSlot)?selectedSlot:'';$('catalogUpdated').textContent=`更新于 ${time()}`;drawProducts()}
-      function drawProducts(){const quality=$('qualityFilter').value,slot=$('slotFilter').value,query=$('productSearch').value.trim().toLowerCase(),sort=$('sortFilter').value;let list=productList.filter(p=>(!quality||p.qualityCode===quality)&&(!slot||p.slotType===slot)&&(!query||[p.itemName,p.itemCode,p.id,p.sellerId,p.playerItemId].some(v=>String(v??'').toLowerCase().includes(query))));if(sort==='priceAsc')list.sort((a,b)=>Number(a.price)-Number(b.price));if(sort==='priceDesc')list.sort((a,b)=>Number(b.price)-Number(a.price));const total=list.length,pages=Math.ceil(total/pageSize);if(productPage>=pages)productPage=Math.max(0,pages-1);const start=productPage*pageSize,shown=list.slice(start,start+pageSize);$('catalogCount').textContent=`${total.toLocaleString()} / ${productList.length.toLocaleString()} 件商品`;$('pageInfo').textContent=total?`${start+1}–${Math.min(start+pageSize,total)} / ${total}`:'没有符合条件的商品';$('prevPage').disabled=productPage===0;$('nextPage').disabled=!pages||productPage>=pages-1;if(!shown.length){$('productRows').innerHTML='<tr><td colspan="6"><div class="empty">没有符合条件的商品</div></td></tr>';return}$('productRows').innerHTML=shown.map(p=>{const q=String(p.qualityCode||'').toLowerCase();const attrs=(p.attributes||[]).map(a=>`${esc(a.displayName||a.code)} +${esc(a.value)}${a.percentage?'%':''}`).join(' · ')||'—';return `<tr><td><div class="product-name">${esc(p.itemName||p.itemCode||'未知商品')}</div><div class="product-meta">${esc(p.itemCode||'')} · #${esc(p.id)}</div></td><td><span class="quality ${esc(q)}"><span class="quality-dot"></span>${esc(p.qualityCode||'未知')}</span></td><td><span class="slot-tag">${esc(slotNames[p.slotType]||p.slotType||'—')}</span></td><td><div class="attributes">${attrs}</div></td><td><span class="seller">#${esc(p.sellerId??'—')}</span></td><td><span class="price">${esc(p.price??'—')}</span></td></tr>`}).join('')}
-      function formatJSON(data){return JSON.stringify(data,null,2).replace(/("(?:\\.|[^"\\])*"\s*:)/g,'<span class="key">$1</span>')}
-      function record(ok,status,duration,label,data,error){const ev={ok,status,duration,time:time(),label};events.unshift(ev);events=events.slice(0,30);scans++;$('scans').textContent=scans.toLocaleString();$('latency').innerHTML=`${duration}<small>ms</small>`;$('apiStatus').textContent=ok?'连接正常':'请求异常';$('apiStatus').style.color=ok?'var(--green)':'var(--red)';$('lastUpdated').textContent=`最近更新 ${ev.time}`;$('responseStatus').textContent=ok?`HTTP ${status} · ${duration} ms`:`${status} · ${error||'网络错误'}`;$('responseStatus').style.color=ok?'var(--green)':'var(--red)';if(data!==undefined){lastData=data;const raw=JSON.stringify(data);$('responseSize').textContent=`${new Blob([raw]).size} B`;const preview=Array.isArray(data?.products)?{...data,products:data.products.slice(0,3),products_note:`商城表格中可查看和筛选全部 ${data.products.length} 件商品`}:data;$('response').innerHTML=formatJSON(preview);const n=countProducts(data);if(n!==null)$('products').textContent=n.toLocaleString();renderCatalog(data)}else $('response').textContent=error||'请求失败';renderEvents()}
-      async function requestOne(index,total){const started=performance.now();try{const t=token.value.trim();const res=await fetch('/api/shop',{method:'GET',headers:{'Content-Type':'application/json',...(t?{Authorization:/^Bearer\s/i.test(t)?t:`Bearer ${t}`}:{})},cache:'no-store'});const duration=Math.round(performance.now()-started);const text=await res.text();let data;try{data=JSON.parse(text)}catch{data=text}record(res.ok,res.status,duration,`线程 ${index}/${total}`,data,res.ok?'':(typeof data==='string'?data:res.statusText));return res.ok}catch(err){const duration=Math.round(performance.now()-started);record(false,'ERR',duration,`线程 ${index}/${total}`,undefined,err.message);return false}}
-      async function scan(){if(busy)return;save();busy=true;const n=Math.max(1,Math.min(20,Number(concurrencyInput.value)||1));const jobs=Array.from({length:n},(_,i)=>requestOne(i+1,n));await Promise.all(jobs);busy=false}
-      function start(){if(timer)return;if(!token.value.trim()){toast('请先填写 Bearer Token');token.focus();return}save();$('toggleBtn').classList.add('running');$('toggleText').textContent='停止监控';$('toggleIcon').innerHTML='<path d="M7 7h10v10H7z"/>';scan();timer=setInterval(scan,Math.max(5,Number(intervalInput.value)||5)*1000);toast(`监控已启动 · 每 ${Math.max(5,Number(intervalInput.value)||5)} 秒`)}
-      function stop(){clearInterval(timer);timer=null;$('toggleBtn').classList.remove('running');$('toggleText').textContent='开始监控';$('toggleIcon').innerHTML='<path d="M8 5v14l11-7z"/>';toast('监控已暂停')}
-      $('toggleBtn').addEventListener('click',()=>timer?stop():start());$('onceBtn').addEventListener('click',()=>{if(!token.value.trim()){toast('请先填写 Bearer Token');token.focus();return}scan()});$('revealBtn').addEventListener('click',()=>token.type=token.type==='password'?'text':'password');$('saveToggle').addEventListener('click',()=>{remember=!remember;updateSwitch();save()});$('clearLog').addEventListener('click',()=>{events=[];renderEvents();toast('记录已清空')});[token,intervalInput,concurrencyInput].forEach(el=>el.addEventListener('change',save));['qualityFilter','slotFilter','sortFilter'].forEach(id=>$(id).addEventListener('change',()=>{productPage=0;drawProducts()}));$('productSearch').addEventListener('input',()=>{productPage=0;drawProducts()});$('prevPage').addEventListener('click',()=>{if(productPage>0){productPage--;drawProducts()}});$('nextPage').addEventListener('click',()=>{productPage++;drawProducts()});
-      setInterval(()=>{$('clock').textContent=time()},1000);$('clock').textContent=time();
+
+      function toast(message) {
+        const el = $('toast'); el.textContent = message; el.classList.add('show');
+        clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove('show'), 2600);
+      }
+      function time() { return new Date().toLocaleTimeString('zh-CN', {hour12:false}); }
+      function esc(value) {
+        return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      }
+      function selectedQualities() { return [...$('buyQualities').querySelectorAll('input:checked')].map(el=>el.value); }
+      function applyQualities(values) {
+        const selected = new Set(Array.isArray(values) ? values : ['L3']);
+        if(selected.has('*')) ['L1','L2','L3','L4'].forEach(value=>selected.add(value));
+        $('buyQualities').querySelectorAll('input').forEach(el => { el.checked=selected.has(el.value); });
+        if(!selectedQualities().length) $('buyQualities').querySelector('input[value="L3"]').checked=true;
+      }
+      function authHeaders() {
+        const value = token.value.trim();
+        return value ? {Authorization:/^Bearer\s/i.test(value) ? value : `Bearer ${value}`} : {};
+      }
+      function save() {
+        remember = $('saveToggle').classList.contains('on');
+        if (remember && token.value.trim()) localStorage.setItem('tabby_shop_token', token.value.trim());
+        else localStorage.removeItem('tabby_shop_token');
+        localStorage.setItem('tabby_shop_settings', JSON.stringify({interval:intervalInput.value,concurrency:concurrencyInput.value,remember}));
+      }
+      function saveBuySettings() {
+        $('buyMinPrice').value = Math.max(0, Number($('buyMinPrice').value) || 0);
+        $('buyMaxPrice').value = Math.max(Number($('buyMinPrice').value)+0.01, Number($('buyMaxPrice').value) || 200);
+        $('buyBudget').value = Math.max(0.01, Number($('buyBudget').value) || 200);
+        $('buyMaxCount').value = Math.max(1, Math.min(10, Math.floor(Number($('buyMaxCount').value) || 1)));
+        localStorage.setItem('tabby_shop_buy_settings', JSON.stringify({qualities:selectedQualities(),minPrice:$('buyMinPrice').value,maxPrice:$('buyMaxPrice').value,budget:$('buyBudget').value,maxCount:$('buyMaxCount').value}));
+        if (!hydrating) saveServerConfig();
+      }
+      function serverConfig() { return {interval:Number(intervalInput.value)||5,concurrency:Number(concurrencyInput.value)||3,qualities:selectedQualities(),minPrice:Number($('buyMinPrice').value),maxPrice:Number($('buyMaxPrice').value),budget:Number($('buyBudget').value),maxCount:Number($('buyMaxCount').value)}; }
+      async function saveServerConfig() {
+        try { const res=await fetch('/api/monitor/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(serverConfig())}); if(!res.ok) throw new Error((await res.json()).error||'保存失败'); }
+        catch(err) { setBuyStatus(`配置未能保存到服务端：${err.message}`,'error'); }
+      }
+      function updateSwitch() {
+        $('saveToggle').classList.toggle('on', remember);
+        $('saveToggle').setAttribute('aria-checked', String(remember));
+      }
+      function setBuyStatus(message, kind='') {
+        $('buyStatus').textContent = message;
+        $('buyStatus').classList.toggle('active', kind === 'active');
+        $('buyStatus').classList.toggle('error', kind === 'error');
+      }
+      function setMonitorUI(running) {
+        $('toggleBtn').classList.toggle('running', running);
+        $('toggleText').textContent = running ? '停止监控' : '开始监控';
+        $('toggleIcon').innerHTML = running ? '<path d="M7 7h10v10H7z"/>' : '<path d="M8 5v14l11-7z"/>';
+      }
+      function setAutoUI() {
+        $('autoBuyBtn').classList.toggle('active', autoBuyActive);
+        $('autoBuyBtn').textContent = autoBuyActive ? '停止秒购' : '启动秒购';
+      }
+      async function stopMonitor() {
+        try { const res=await fetch('/api/monitor/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); if(!res.ok) throw new Error('停止服务端监控失败'); serverMonitorEnabled=false; setMonitorUI(false); }
+        catch(err) { toast(err.message); }
+      }
+      function renderEvents() {
+        $('recordCount').textContent = `${events.length} EVENTS`;
+        if (!events.length) {
+          $('activity').innerHTML = '<div class="empty">准备就绪<br/>启动监控后，请求记录会显示在这里</div>';
+          return;
+        }
+        $('activity').innerHTML = events.slice(0,7).map(e => `<div class="activity-row"><span class="status-dot ${e.ok?'ok':'fail'}"></span><div><div class="activity-main">${e.ok?(e.duration!==undefined?'商城数据刷新成功':'服务端扫描完成'):'请求失败'}</div><div class="activity-meta">${e.time} · ${e.duration!==undefined?`${e.duration} ms · `:''}${esc(e.label||'')}</div></div><span class="activity-code ${e.ok?'':'fail'}">${e.status??(e.matches??'—')}</span></div>`).join('');
+      }
+      function countProducts(data) {
+        if (Array.isArray(data)) return data.length;
+        if (!data || typeof data !== 'object') return null;
+        for (const key of ['products','items','shop','data','goods']) if (key in data) {
+          const count = countProducts(data[key]); if (count !== null) return count;
+        }
+        return null;
+      }
+      function renderCatalog(data) {
+        if (!Array.isArray(data?.products)) return;
+        productList = data.products;
+        const selectedQuality = $('qualityFilter').value, selectedSlot = $('slotFilter').value;
+        const qualities = [...new Set(productList.map(p => p.qualityCode).filter(Boolean))].sort((a,b) => Number(a.slice(1))-Number(b.slice(1)));
+        const slots = [...new Set(productList.map(p => p.slotType).filter(Boolean))].sort();
+        $('qualityFilter').innerHTML = '<option value="">全部品质</option>' + qualities.map(q => `<option value="${esc(q)}">${esc(q)} 品质</option>`).join('');
+        $('slotFilter').innerHTML = '<option value="">全部部位</option>' + slots.map(s => `<option value="${esc(s)}">${esc(slotNames[s]||s)}</option>`).join('');
+        $('qualityFilter').value = qualities.includes(selectedQuality) ? selectedQuality : '';
+        $('slotFilter').value = slots.includes(selectedSlot) ? selectedSlot : '';
+        $('catalogUpdated').textContent = `更新于 ${time()}`;
+        drawProducts();
+      }
+      function drawProducts() {
+        const quality = $('qualityFilter').value, slot = $('slotFilter').value;
+        const query = $('productSearch').value.trim().toLowerCase(), sort = $('sortFilter').value;
+        let list = productList.filter(p => (!quality || p.qualityCode === quality) && (!slot || p.slotType === slot) &&
+          (!query || [p.itemName,p.itemCode,p.id,p.sellerId,p.playerItemId].some(v => String(v??'').toLowerCase().includes(query))));
+        if (sort === 'priceAsc') list.sort((a,b) => Number(a.price)-Number(b.price));
+        if (sort === 'priceDesc') list.sort((a,b) => Number(b.price)-Number(a.price));
+        const total = list.length, pages = Math.ceil(total/pageSize);
+        if (productPage >= pages) productPage = Math.max(0,pages-1);
+        const start = productPage*pageSize, shown = list.slice(start,start+pageSize);
+        $('catalogCount').textContent = `${total.toLocaleString()} / ${productList.length.toLocaleString()} 件商品`;
+        $('pageInfo').textContent = total ? `${start+1}–${Math.min(start+pageSize,total)} / ${total}` : '没有符合条件的商品';
+        $('prevPage').disabled = productPage === 0; $('nextPage').disabled = !pages || productPage >= pages-1;
+        if (!shown.length) { $('productRows').innerHTML = '<tr><td colspan="6"><div class="empty">没有符合条件的商品</div></td></tr>'; return; }
+        $('productRows').innerHTML = shown.map(p => {
+          const q = String(p.qualityCode||'').toLowerCase();
+          const attrs = (p.attributes||[]).map(a => `${esc(a.displayName||a.code)} +${esc(a.value)}${a.percentage?'%':''}`).join(' · ') || '—';
+          return `<tr><td><div class="product-name">${esc(p.itemName||p.itemCode||'未知商品')}</div><div class="product-meta">${esc(p.itemCode||'')} · #${esc(p.id)}</div></td><td><span class="quality ${esc(q)}"><span class="quality-dot"></span>${esc(p.qualityCode||'未知')}</span></td><td><span class="slot-tag">${esc(slotNames[p.slotType]||p.slotType||'—')}</span></td><td><div class="attributes">${attrs}</div></td><td><span class="seller">#${esc(p.sellerId??'—')}</span></td><td><span class="price">${esc(p.price??'—')}</span></td></tr>`;
+        }).join('');
+      }
+      function formatJSON(data) { return JSON.stringify(data,null,2).replace(/("(?:\\.|[^"\\])*"\s*:)/g,'<span class="key">$1</span>'); }
+      function record(ok,status,duration,label,data,error) {
+        const ev = {ok,status,duration,time:time(),label}; events.unshift(ev); events = events.slice(0,30); scans++;
+        $('scans').textContent = scans.toLocaleString(); $('latency').innerHTML = `${duration}<small>ms</small>`;
+        $('apiStatus').textContent = ok ? '连接正常' : '请求异常'; $('apiStatus').style.color = ok ? 'var(--green)' : 'var(--red)';
+        $('lastUpdated').textContent = `最近更新 ${ev.time}`;
+        $('responseStatus').textContent = ok ? `HTTP ${status} · ${duration} ms` : `${status} · ${error||'网络错误'}`;
+        $('responseStatus').style.color = ok ? 'var(--green)' : 'var(--red)';
+        if (data !== undefined) {
+          const raw = JSON.stringify(data); $('responseSize').textContent = `${new Blob([raw]).size} B`;
+          const preview = Array.isArray(data?.products) ? {...data,products:data.products.slice(0,3),products_note:`商品表格中可查看和筛选全部 ${data.products.length} 件商品`} : data;
+          $('response').innerHTML = formatJSON(preview);
+          const count = countProducts(data); if (count !== null) $('products').textContent = count.toLocaleString();
+          renderCatalog(data);
+        } else $('response').textContent = error || '请求失败';
+        renderEvents();
+      }
+
+      async function requestOne(index,total) {
+        const started = performance.now();
+        try {
+          const res = await fetch('/api/shop',{method:'GET',headers:{'Content-Type':'application/json',...authHeaders()},cache:'no-store'});
+          const duration = Math.round(performance.now()-started), text = await res.text();
+          let data; try { data = JSON.parse(text); } catch { data = text; }
+          record(res.ok,res.status,duration,`线程 ${index}/${total}`,data,res.ok?'':(typeof data==='string'?data:res.statusText));
+          return res.ok;
+        } catch (err) {
+          record(false,'ERR',Math.round(performance.now()-started),`线程 ${index}/${total}`,undefined,err.message);
+          return false;
+        }
+      }
+      async function scan() {
+        if (busy) return;
+        save(); busy = true;
+        try { await requestOne(1,1); }
+        finally { busy = false; }
+      }
+      async function start() {
+        if (!token.value.trim()) { toast('请先填写 Bearer Token'); token.focus(); return false; }
+        save(); saveBuySettings();
+        try {
+          const res=await fetch('/api/monitor/start',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(serverConfig())});
+          const state=await res.json(); if(!res.ok) throw new Error(state.error||'无法启动服务端监控');
+          serverMonitorEnabled=!!state.enabled; setMonitorUI(serverMonitorEnabled); autoBuyActive=!!state.autoBuyEnabled; setAutoUI();
+          if(state.walletAddress) { walletAddress=state.walletAddress; $('walletStatus').textContent=`已导入签名账户 · ${walletAddress}`; $('clearKeyBtn').hidden=false; } refreshMonitorState();
+        } catch(err) { toast(err.message); return false; }
+        toast(`监控已启动 · 每 ${Math.max(5,Number(intervalInput.value)||5)} 秒`);
+        return true;
+      }
+      function stop() {
+        stopMonitor();
+        autoBuyActive=false; setAutoUI();
+        toast('监控已暂停');
+      }
+      async function refreshMonitorState(initial=false) {
+        try {
+          const res=await fetch('/api/monitor/state',{cache:'no-store'}); if(!res.ok) return;
+          const state=await res.json();
+          serverMonitorEnabled=!!state.enabled; setMonitorUI(serverMonitorEnabled); autoBuyActive=!!state.autoBuyEnabled; setAutoUI();
+          if(state.walletAddress) { walletAddress=state.walletAddress; $('walletStatus').textContent=`已导入签名账户 · ${walletAddress}`; $('clearKeyBtn').hidden=false; }
+          if(initial && state.config) {
+            const c=state.config; intervalInput.value=c.interval; concurrencyInput.value=c.concurrency;
+            applyQualities(c.qualities || (c.quality ? [c.quality] : ['L3'])); $('buyMinPrice').value=c.minPrice; $('buyMaxPrice').value=c.maxPrice; $('buyBudget').value=c.budget; $('buyMaxCount').value=c.maxCount;
+            localStorage.setItem('tabby_shop_buy_settings',JSON.stringify({qualities:selectedQualities(),minPrice:c.minPrice,maxPrice:c.maxPrice,budget:c.budget,maxCount:c.maxCount}));
+            $('response').innerHTML=formatJSON({enabled:state.enabled,status:state.status,config:state.config,lastScan:state.lastScan,candidate:state.candidate});
+          }
+          scans=state.scanCount||0; $('scans').textContent=scans.toLocaleString();
+          if(state.lastScan) $('lastUpdated').textContent=`最近更新 ${new Date(state.lastScan).toLocaleTimeString('zh-CN',{hour12:false})}`;
+          if(state.status==='error') { $('apiStatus').textContent='请求异常'; $('apiStatus').style.color='var(--red)'; $('responseStatus').textContent=state.error||'服务端扫描失败'; $('responseStatus').style.color='var(--red)'; }
+          else if(state.lastScan) { $('apiStatus').textContent='连接正常'; $('apiStatus').style.color='var(--green)'; $('responseStatus').textContent=state.enabled?'服务端监控运行中':'服务端最近扫描'; $('responseStatus').style.color='var(--green)'; }
+          if(state.lastScan) $('products').textContent=(state.productCount||0).toLocaleString();
+          events=state.events||[]; renderEvents();
+          if(state.revision!==lastProductRevision && state.revision>0) {
+            lastProductRevision=state.revision;
+            const pr=await fetch('/api/monitor/products',{cache:'no-store'}); if(pr.ok) { const data=await pr.json(); renderCatalog(data); $('catalogUpdated').textContent=`服务端更新于 ${new Date(data.lastScan).toLocaleTimeString('zh-CN',{hour12:false})}`; }
+          }
+          if(state.candidate && autoBuyActive) setBuyStatus(`后台秒购运行中 · ${state.candidate.qualityCode} · ${state.candidate.itemName} · ${state.candidate.price}`, 'active');
+          else if(state.candidate) setBuyStatus(`符合条件：${state.candidate.qualityCode} · ${state.candidate.itemName} · ${state.candidate.price}`, 'active');
+          else if(state.lastScan) setBuyStatus('服务端正在监控，当前没有符合筛选条件的商品。',state.enabled?'active':'');
+          if(hydrating) hydrating=false;
+        } catch {}
+      }
+
+      function limits() {
+        saveBuySettings();
+        return {qualities:selectedQualities(),minPrice:Number($('buyMinPrice').value),maxPrice:Number($('buyMaxPrice').value),budget:Number($('buyBudget').value),maxCount:Number($('buyMaxCount').value)};
+      }
+      async function toggleAutoBuy() {
+        if (autoBuyActive) {
+          const res=await fetch('/api/monitor/auto-buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:false})});
+          const state=await res.json(); autoBuyActive=!!state.autoBuyEnabled; setAutoUI(); setBuyStatus('后台秒购已停止。'); return;
+        }
+        if (!token.value.trim()) { toast('请先填写 Bearer Token'); token.focus(); return; }
+        if (!walletAddress) { toast('请先导入私钥'); $('privateKey').focus(); return; }
+        if (!window.confirm('启动后，服务端会在命中商品时使用系统钥匙串中的私钥自动创建订单并广播 BSC 转账，不会弹出钱包确认。确定继续？')) return;
+        saveBuySettings();
+        if (!serverMonitorEnabled && !await start()) return;
+        const res=await fetch('/api/monitor/auto-buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:true})});
+        const state=await res.json(); if(!res.ok) { toast(state.error||'启动秒购失败'); return; }
+        autoBuyActive=!!state.autoBuyEnabled; setAutoUI();
+        const cap=limits(), qualityName=cap.qualities.includes('*')?'全部品质':cap.qualities.join('、');
+        setBuyStatus(`后台秒购运行中：${qualityName}，价格 ${cap.minPrice} ≤ 单价 < ${cap.maxPrice}；预算 ${cap.budget}，最多 ${cap.maxCount} 件。服务端将自动签名提交。`,'active');
+      }
+      async function importWallet() {
+        const privateKey=$('privateKey').value.trim(); if(!privateKey) { toast('先粘贴私钥'); return; }
+        try {
+          const res=await fetch('/api/wallet/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({privateKey})});
+          const data=await res.json(); if(!res.ok) throw new Error(data.error||'导入失败');
+          walletAddress=data.address; $('walletStatus').textContent=`已导入签名账户 · ${walletAddress}`; $('clearKeyBtn').hidden=false;
+          $('privateKey').value=''; toast('私钥已保存至系统钥匙串');
+        } catch(err) { toast(err.message); }
+      }
+      async function removeWallet() {
+        await fetch('/api/wallet/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        walletAddress=''; autoBuyActive=false; setAutoUI(); $('clearKeyBtn').hidden=true; $('walletStatus').textContent='尚未导入签名账户';
+      }
+
+      $('toggleBtn').addEventListener('click',() => serverMonitorEnabled ? stop() : start());
+      $('onceBtn').addEventListener('click',() => { if (!token.value.trim()) { toast('请先填写 Bearer Token'); token.focus(); return; } scan(); });
+      $('revealBtn').addEventListener('click',() => token.type = token.type === 'password' ? 'text' : 'password');
+      $('saveToggle').addEventListener('click',() => { remember = !remember; updateSwitch(); save(); });
+      $('clearLog').addEventListener('click',() => { events = []; renderEvents(); toast('记录已清空'); });
+      $('walletBtn').addEventListener('click',importWallet); $('clearKeyBtn').addEventListener('click',removeWallet);
+      $('autoBuyBtn').addEventListener('click',toggleAutoBuy);
+      [token,intervalInput,concurrencyInput].forEach(el => el.addEventListener('change',() => { save(); saveServerConfig(); }));
+      $('buyQualities').addEventListener('change',()=>{ if(!selectedQualities().length) $('buyQualities').querySelector('input[value="L3"]').checked=true; saveBuySettings(); });
+      ['buyMinPrice','buyMaxPrice','buyBudget','buyMaxCount'].forEach(id => $(id).addEventListener('change',saveBuySettings));
+      ['qualityFilter','slotFilter','sortFilter'].forEach(id => $(id).addEventListener('change',() => { productPage=0; drawProducts(); }));
+      $('productSearch').addEventListener('input',() => { productPage=0; drawProducts(); });
+      $('prevPage').addEventListener('click',() => { if (productPage>0) { productPage--; drawProducts(); } });
+      $('nextPage').addEventListener('click',() => { productPage++; drawProducts(); });
+
+      setInterval(() => {$('clock').textContent=time();},1000);
+      $('clock').textContent=time();
+      refreshMonitorState(true);
+      stateTimer = setInterval(() => refreshMonitorState(),2000);
+      fetch('/api/wallet/status',{cache:'no-store'}).then(r=>r.json()).then(w=>{ if(w.address) { walletAddress=w.address; $('walletStatus').textContent=`已导入签名账户 · ${walletAddress}`; $('clearKeyBtn').hidden=false; } }).catch(()=>{});
     })();
   </script>
 </body>
