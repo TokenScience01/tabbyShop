@@ -22,7 +22,7 @@ from town_navigation import find_map_path, find_town_path
 from minimap import TacticalMap
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -238,7 +238,15 @@ MONSTER_NAMES_ZH = {
 SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES": "鞋子",
                  "RING": "戒指", "AMULET": "护符", "OTHER": "消耗品"}
 QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀", "RARE": "稀有",
-                    "EPIC": "史诗", "LEGENDARY": "传说"}
+                    "EPIC": "史诗", "LEGENDARY": "传说",
+                    "L1": "普通", "L2": "稀有", "L3": "史诗", "L4": "传说"}
+QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#63adff", "L3": "#c487ff", "L4": "#f2c45f",
+                  "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#63adff",
+                  "RARE": "#63adff", "EPIC": "#c487ff", "LEGENDARY": "#f2c45f"}
+
+
+def quality_color(value: object) -> str:
+    return QUALITY_COLORS.get(str(value or "").upper(), "#d5dccd")
 try:
     _item_name_rows = json.loads((Path(__file__).with_name("assets") / "item_names_zh.json").read_text(encoding="utf-8"))
 except (OSError, ValueError):
@@ -608,6 +616,11 @@ class MainWindow(QMainWindow):
         travel_title = QLabel("地图切换")
         travel_title.setObjectName("sectionTitle")
         travel_layout.addWidget(travel_title)
+        self.current_map_label = QLabel("等待进入地图")
+        self.current_map_label.setObjectName("currentMapBadge")
+        self.current_map_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.current_map_label.setWordWrap(True)
+        travel_layout.addWidget(self.current_map_label)
         self.world_status = QLabel("等待登录游戏世界…")
         self.world_status.setObjectName("subtitle")
         travel_layout.addWidget(self.world_status)
@@ -640,10 +653,16 @@ class MainWindow(QMainWindow):
         self.stop_move_button.setEnabled(False)
         self.stop_move_button.clicked.connect(self.cancel_travel)
         options.addWidget(self.quest_id)
-        options.addWidget(self.use_ticket)
         options.addStretch(1)
         options.addWidget(self.stop_move_button)
         travel_layout.addLayout(options)
+        entry_options = QHBoxLayout()
+        entry_options.addWidget(self.use_ticket)
+        ticket_hint = QLabel("仅进入废弃遗迹时需要")
+        ticket_hint.setObjectName("subtitle")
+        entry_options.addWidget(ticket_hint)
+        entry_options.addStretch(1)
+        travel_layout.addLayout(entry_options)
         return_options = QHBoxLayout()
         self.auto_return_map = QCheckBox("复活后自动进入")
         self.return_map = QComboBox()
@@ -676,18 +695,28 @@ class MainWindow(QMainWindow):
         self.refresh_profile_button.clicked.connect(lambda: self.refresh_profile_data(force=True))
         self.auto_quest = QCheckBox("完成后自动接打怪任务")
         self.auto_quest.setChecked(True)
-        quest_title_row.addWidget(self.auto_quest)
+        self.auto_quest.setProperty("taskOption", True)
         self.task_limited_mode = QCheckBox("任务有限模式")
+        self.task_limited_mode.setProperty("taskOption", True)
         self.task_limited_mode.setToolTip("只攻击当前进行中的怪物任务目标；完成、无可接任务或今日领取已满时暂停，不转为自由刷怪。")
         self.task_limited_mode.toggled.connect(self.on_task_limited_mode_changed)
-        quest_title_row.addWidget(self.task_limited_mode)
         self.quest_map_auto = QCheckBox("按任务地图自动进图")
+        self.quest_map_auto.setProperty("taskOption", True)
         self.quest_map_auto.setToolTip("自动接取新任务后，沿地图入口路线前往该任务对应地图。遗迹仍需入场券。")
         self.quest_map_auto.stateChanged.connect(self.on_quest_map_auto_changed)
         self.use_ticket.stateChanged.connect(lambda *_: QTimer.singleShot(0, self.continue_quest_map_travel))
-        quest_title_row.addWidget(self.quest_map_auto)
         quest_title_row.addWidget(self.refresh_profile_button)
         quest_layout.addLayout(quest_title_row)
+        quest_mode_row = QHBoxLayout()
+        quest_mode_row.setSpacing(20)
+        quest_mode_row.addWidget(self.auto_quest)
+        quest_mode_row.addWidget(self.task_limited_mode)
+        quest_mode_row.addStretch(1)
+        quest_layout.addLayout(quest_mode_row)
+        quest_travel_row = QHBoxLayout()
+        quest_travel_row.addWidget(self.quest_map_auto)
+        quest_travel_row.addStretch(1)
+        quest_layout.addLayout(quest_travel_row)
         self.quest_status = QLabel("等待服务端任务数据…")
         self.quest_status.setObjectName("subtitle")
         quest_layout.addWidget(self.quest_status)
@@ -975,6 +1004,7 @@ class MainWindow(QMainWindow):
             place(box, widget)
         left.addWidget(battle)
         travel, box = card("地图与复活")
+        place(box, self.current_map_label)
         self.world_status.setWordWrap(True)
         place(box, self.world_status)
         grid = QGridLayout()
@@ -990,7 +1020,13 @@ class MainWindow(QMainWindow):
         self.respawn_button.setVisible(self.server_dead)
         place(box, self.auto_return_map)
         place(box, self.return_map)
-        place(box, self.use_ticket)
+        ticket_row = QHBoxLayout()
+        place(ticket_row, self.use_ticket)
+        ticket_hint = QLabel("仅进入废弃遗迹时需要")
+        ticket_hint.setObjectName("subtitle")
+        ticket_row.addWidget(ticket_hint)
+        ticket_row.addStretch(1)
+        box.addLayout(ticket_row)
         place(box, self.stop_move_button)
         place(box, self.travel_status)
         left.addWidget(travel)
@@ -1024,11 +1060,16 @@ class MainWindow(QMainWindow):
         quest_box.setContentsMargins(10, 12, 10, 10)
         quest_box.setSpacing(10)
         quest_row = QHBoxLayout()
+        quest_row.setSpacing(14)
         place(quest_row, self.auto_quest)
         place(quest_row, self.task_limited_mode)
         quest_row.addStretch()
         place(quest_row, self.refresh_profile_button)
         quest_box.addLayout(quest_row)
+        quest_travel_row = QHBoxLayout()
+        place(quest_travel_row, self.quest_map_auto)
+        quest_travel_row.addStretch(1)
+        quest_box.addLayout(quest_travel_row)
         place(quest_box, self.quest_status)
         self.quest_table.setMinimumHeight(160)
         self.quest_table.setMaximumHeight(16777215)
@@ -1077,9 +1118,6 @@ class MainWindow(QMainWindow):
             QComboBox { color: #e3edf7; background: #1b1e1b; border: 1px solid #424a3e; border-radius: 7px; padding: 8px; }
             QComboBox QAbstractItemView { color: #e3edf7; background: #293025; selection-background-color: #285b50; }
             QHeaderView { background: #30352f; }
-            QCheckBox::indicator { width: 15px; height: 15px; border-radius: 4px; border: 1px solid #50657c; background: #1b1e1b; }
-            QCheckBox::indicator:checked { background: #9bb490; border: 3px solid #52664a; }
-            QCheckBox::indicator:hover { border-color: #afc69e; }
             QPushButton:focus, QCheckBox:focus, QComboBox:focus { border: 1px solid #afc69e; }
         """)
         for button in root.findChildren(QPushButton):
@@ -1102,6 +1140,7 @@ class MainWindow(QMainWindow):
                                   f"坐标 {self.world_x}, {self.world_y}")
 
     def apply_theme(self) -> None:
+        check_icon = Path(__file__).with_name("assets") / "checkmark.svg"
         self.setStyleSheet("""
             QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #181a19; color: #e6e8df; }
             QFrame#card { background: #222522; border: 1px solid #363d33; border-radius: 12px; }
@@ -1110,6 +1149,7 @@ class MainWindow(QMainWindow):
             QLabel#subtitle { color: #a8afa3; font-size: 12px; }
             QLabel#sectionTitle { color: #e6e8df; font-size: 15px; font-weight: 700; }
             QLabel#fieldLabel { color: #afbed2; font-size: 12px; font-weight: 600; }
+            QLabel#currentMapBadge { color: #f0f4e8; background: #33432d; border: 1px solid #718b5f; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-weight: 700; }
             QLabel#sessionUrl { color: #dce8f7; font-family: Menlo, monospace; font-size: 13px; }
             QLabel#status { color: #a8bad0; font-size: 12px; font-weight: 700; }
             QLineEdit, QPlainTextEdit, QSpinBox { background: #1b1e1b; color: #e1e6da; border: 1px solid #424a3e; border-radius: 8px; padding: 8px 10px; selection-background-color: #2c6e5a; }
@@ -1124,14 +1164,21 @@ class MainWindow(QMainWindow):
             QPushButton#primaryButton:hover { background: #aec4a4; border-color: #aec4a4; }
             QPushButton#secondaryButton { background: #30362e; color: #dce2d5; border: 1px solid #4a5545; }
             QPushButton#secondaryButton:hover { background: #3c4637; }
+            QPushButton#secondaryButton[currentMap="true"] { background: #415536; color: #f3f7e9; border: 2px solid #9bb490; }
             QPushButton#quietButton { background: transparent; color: #aab5a4; border: 1px solid transparent; padding-left: 5px; padding-right: 5px; }
             QPushButton#quietButton:hover { color: #e7f3ff; background: #343e2f; }
             QPushButton:disabled { background: #253245; color: #77889b; border: 1px solid #34445b; }
-            QCheckBox { color: #cbd9e8; spacing: 8px; }
+            QCheckBox { color: #cbd9e8; spacing: 10px; }
+            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #64715e; background: #171b17; }
+            QCheckBox::indicator:hover { border-color: #b0c99e; background: #273026; }
+            QCheckBox::indicator:checked { background: #8eae80; border: 1px solid #8eae80; image: url("@CHECK_ICON@"); }
+            QCheckBox[taskOption="true"] { color: #dce5d5; spacing: 10px; padding: 5px 11px; min-height: 30px; background: #1d211d; border: 1px solid #3c4738; border-radius: 8px; }
+            QCheckBox[taskOption="true"]:hover { background: #252d23; border-color: #627454; }
+            QCheckBox[taskOption="true"]:checked { border-color: #718b5f; }
             QScrollBar:vertical { background: #181a19; width: 10px; }
             QScrollBar::handle:vertical { background: #32445b; border-radius: 5px; min-height: 25px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        """)
+        """.replace("@CHECK_ICON@", str(check_icon).replace("\\", "/")))
 
     def append_log(self, message: str) -> None:
         self.log.appendPlainText(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}")
@@ -1624,13 +1671,21 @@ class MainWindow(QMainWindow):
             button.setEnabled(ready and map_id != self.current_map)
             route = map_id in MAP_ROUTES.get(self.current_map, ())
             button.setText(f"{map_id}  {MAP_NAMES[map_id].split(' · ')[-1]}")
+            button.setProperty("currentMap", map_id == self.current_map)
+            style = QApplication.style()
+            style.unpolish(button)
+            style.polish(button)
             button.setToolTip(MAP_NAMES[map_id] + (" · 相邻入口" if route else ""))
         if self.current_map is None:
+            self.current_map_label.setText("等待进入地图")
+            self.current_map_label.setToolTip("")
             self.world_status.setText("等待登录游戏世界…")
         else:
+            map_name = MAP_NAMES.get(self.current_map, str(self.current_map))
+            self.current_map_label.setText(f"当前所在地图  ·  {map_name.split(' · ')[-1]}")
+            self.current_map_label.setToolTip(map_name)
             self.world_status.setText(
-                f"当前：{MAP_NAMES.get(self.current_map, str(self.current_map))}"
-                f"    {'预计坐标' if self.position_estimated else '坐标'}：({self.world_x}, {self.world_y})"
+                f"{'预计坐标' if self.position_estimated else '坐标'}：({self.world_x}, {self.world_y})"
                 f"    修订：{self.movement_revision}    生命序号：{self.life}"
             )
 
@@ -2421,8 +2476,11 @@ class MainWindow(QMainWindow):
                 item = equipped.get(slot)
                 if item:
                     title = localized_item_name(item)
+                    rarity = str(item.get("qualityCode", "L1"))
+                    color = quality_color(rarity)
                     label.setText(f"{caption} · {title}")
                     label.setToolTip(json.dumps(item, ensure_ascii=False, indent=2))
+                    label.setStyleSheet(f"background:#1b1e1b;border:1px solid #363d33;border-radius:5px;padding:5px;color:{color};font-weight:600;")
                     stem = {"WEAPON": "sword", "HAT": "helmet", "ARMOR": "armor", "SHOES": "boots",
                             "RING": "ring", "AMULET": "amulet"}[slot]
                     level = item.get("equipmentLevel", 1)
@@ -2434,6 +2492,7 @@ class MainWindow(QMainWindow):
                     self.gear_icons[slot].clear()
                     label.setText(f"{caption} · 未穿戴" if "items" in equipment else f"{caption} · 等待装备数据")
                     label.setToolTip("")
+                    label.setStyleSheet("background:#1b1e1b;border:1px solid #363d33;border-radius:5px;padding:5px;color:#a8afa3;")
         self.character_status.setText(
             f"{name} · {class_display}  |  等级 {level}  |  经验 {experience}/{experience_needed}  |  "
             f"生命 {health}/{max_health}  |  攻击 {attack}  |  防御 {defense}  |  金币 {gold}  |  {status}"
@@ -2475,15 +2534,20 @@ class MainWindow(QMainWindow):
                 slot = str(item.get("slotType", "—"))
                 quality = str(item.get("qualityCode", "—"))
                 rows.append([localized_item_name(item), SLOT_NAMES_ZH.get(slot.upper(), slot),
-                             QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1))])
+                             QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1)), quality])
         for key, name in (("healthPotions", "生命药水"), ("bossTickets", "遗迹入场券"), ("atonementStones", "赎罪石")):
             count = self.last_self_state.get(key)
             if isinstance(count, (int, float)) and count > 0:
-                rows.append([name, "消耗品", "—", str(int(count))])
+                rows.append([name, "消耗品", "—", str(int(count)), ""])
         self.backpack_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
-            for col, value in enumerate(values):
-                self.backpack_table.setItem(row, col, QTableWidgetItem(value))
+            quality = values[4]
+            color = QColor(quality_color(quality))
+            for col, value in enumerate(values[:4]):
+                cell = QTableWidgetItem(value)
+                if col in (0, 2) and quality:
+                    cell.setForeground(color)
+                self.backpack_table.setItem(row, col, cell)
         self.backpack_status.setText(f"背包 {len(rows)} 类物品 · 已穿戴装备见角色面板" if "items" in self.api_equipment else "等待服务端背包数据…")
 
     def update_monsters(self, packet: dict) -> None:

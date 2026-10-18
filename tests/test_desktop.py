@@ -9,9 +9,10 @@ from http.server import ThreadingHTTPServer
 from urllib.request import urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QTableWidget
 from PySide6.QtCore import QEventLoop, QTimer
 from desktop import DesktopWindow, shop
+from game_client.wss_tester import QUALITY_NAMES_ZH, quality_color
 
 
 class DesktopTests(unittest.TestCase):
@@ -105,6 +106,26 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(game.questless_farm_mode)
         self.assertIsNone(game.questless_farm_target)
         self.assertFalse(game.combat_timer.isActive())
+
+    def test_rarity_colors_and_current_map_indicator(self):
+        self.assertEqual([quality_color(f'L{level}') for level in range(1, 5)],
+                         ['#f2f2ef', '#63adff', '#c487ff', '#f2c45f'])
+        self.assertEqual(QUALITY_NAMES_ZH['L4'], '传说')
+
+        game = self.window.game
+        game.current_map = 4
+        game.update_map_buttons()
+        self.assertIn('西部荒野', game.current_map_label.text())
+        self.assertTrue(game.map_buttons[4].property('currentMap'))
+
+        game.api_equipment = {'items': [
+            {'itemCode': 'SWORDP1', 'slotType': 'WEAPON', 'qualityCode': 'L3', 'equipped': False},
+        ]}
+        game.backpack_table = QTableWidget(0, 4)
+        game.backpack_status = QLabel()
+        game.update_backpack()
+        self.assertEqual(game.backpack_table.item(0, 0).foreground().color().name(), '#c487ff')
+        self.assertEqual(game.backpack_table.item(0, 2).text(), '史诗')
 
 
 if __name__ == '__main__':
