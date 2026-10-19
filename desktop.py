@@ -283,7 +283,7 @@ class DesktopWindow(QMainWindow):
         def run_download():
             try:
                 temp_dir = Path(tempfile.mkdtemp(prefix='tabby-release-'))
-                archive = download_asset(asset['browser_download_url'],
+                archive = download_asset(asset,
                                          temp_dir / 'TabbyDesktop-windows-x64.zip')
                 self.update_signals.downloaded.emit(str(archive))
             except Exception as exc:

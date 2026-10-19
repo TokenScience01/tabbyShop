@@ -17,7 +17,7 @@ OWNER = "TokenScience01"
 REPOSITORY = "tabbyShop"
 RELEASES_API = f"https://api.github.com/repos/{OWNER}/{REPOSITORY}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{OWNER}/{REPOSITORY}/releases/latest"
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 ASSET_NAME = "TabbyDesktop-windows-x64.zip"
 
 
@@ -84,10 +84,14 @@ def fetch_latest_release(timeout: int = 15) -> dict:
     return release
 
 
-def download_asset(url: str, destination: Path, timeout: int = 60) -> Path:
+def download_asset(asset: dict, destination: Path, timeout: int = 60) -> Path:
+    """Download a private release asset through its authenticated API endpoint."""
+    url = str(asset.get("url", ""))
     if not url.startswith("https://"):
         raise ValueError("更新包地址不是安全的 HTTPS 地址")
-    request = urllib.request.Request(url, headers=github_headers())
+    headers = github_headers()
+    headers["Accept"] = "application/octet-stream"
+    request = urllib.request.Request(url, headers=headers)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(request, timeout=timeout) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)

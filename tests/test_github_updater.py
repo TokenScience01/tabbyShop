@@ -1,4 +1,8 @@
+import io
+import tempfile
 import unittest
+import zipfile
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -63,6 +67,30 @@ class GitHubUpdaterTests(unittest.TestCase):
 
         self.assertEqual(headers['Authorization'], 'Bearer gh-secret-token')
         self.assertNotIn('gh-secret-token', str(updater.__dict__))
+
+    def test_private_release_download_uses_authenticated_asset_api(self):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, 'w') as archive:
+            archive.writestr('TabbyDesktop/TabbyDesktop.exe', b'test')
+        response = io.BytesIO(archive_buffer.getvalue())
+        asset = {
+            'url': 'https://api.github.com/repos/TokenScience01/tabbyShop/releases/assets/123',
+            'browser_download_url': 'https://github.com/TokenScience01/tabbyShop/releases/download/v1/test.zip',
+        }
+
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(updater, 'github_headers', return_value={
+                 'Authorization': 'Bearer test-read-token',
+                 'Accept': 'application/vnd.github+json',
+             }), \
+             patch.object(updater.urllib.request, 'urlopen', return_value=response) as urlopen:
+            destination = Path(temporary) / 'update.zip'
+            updater.download_asset(asset, destination)
+            request = urlopen.call_args.args[0]
+            self.assertEqual(request.full_url, asset['url'])
+            self.assertEqual(request.get_header('Accept'), 'application/octet-stream')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer test-read-token')
+            self.assertTrue(zipfile.is_zipfile(destination))
 
 
 if __name__ == '__main__':
