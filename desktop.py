@@ -8,19 +8,31 @@ import sys
 import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
+import tempfile
+
+from github_updater import (APP_VERSION, RELEASES_PAGE, download_asset,
+                            fetch_latest_release, is_frozen_windows,
+                            launch_update_script, prepare_windows_update)
 
 os.environ['TABBY_SAFE_START'] = '1'
 BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 sys.path.insert(0, str(BASE_DIR / 'game_client'))
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QUrl, Qt, QObject, Signal
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
-                              QStackedWidget, QButtonGroup, QDialog)
+                              QStackedWidget, QButtonGroup, QDialog, QMessageBox)
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from wss_tester import MainWindow as GameWindow
 import server as shop
+
+
+class UpdateSignals(QObject):
+    checked = Signal(object)
+    downloaded = Signal(str)
+    failed = Signal(str)
 
 
 class LocalShopPage(QWebEnginePage):
@@ -38,6 +50,8 @@ class DesktopWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Tabby · 游戏与商城')
+        app_icon = QIcon(str(BASE_DIR / 'assets' / 'tabby-logo.png'))
+        self.setWindowIcon(app_icon)
         self.resize(1220, 900)
         self.setMinimumSize(920, 720)
         self._token = ''
@@ -67,8 +81,17 @@ class DesktopWindow(QMainWindow):
         top = QGridLayout()
         top.setContentsMargins(2, 0, 2, 6)
         top.setHorizontalSpacing(12)
-        brand = QLabel('TABBY  /  游戏与商城')
-        brand.setObjectName('appBrand')
+        brand = QWidget()
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(8)
+        brand_icon = QLabel()
+        brand_icon.setPixmap(QPixmap(str(BASE_DIR / 'assets' / 'tabby-logo.png')).scaled(
+            30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        brand_layout.addWidget(brand_icon)
+        brand_label = QLabel('TABBY  /  游戏与商城')
+        brand_label.setObjectName('appBrand')
+        brand_layout.addWidget(brand_label)
         top.addWidget(brand, 0, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         top.setColumnStretch(0, 1)
 
@@ -104,6 +127,10 @@ class DesktopWindow(QMainWindow):
         self.account_status = QLabel('未连接 · 未设置 Token')
         self.account_status.setObjectName('shellStatus')
         actions_layout.addWidget(self.account_status)
+        self.update_button = QPushButton('检查更新')
+        self.update_button.setObjectName('secondaryButton')
+        self.update_button.clicked.connect(self.check_for_updates)
+        actions_layout.addWidget(self.update_button)
         account = QPushButton('账号连接')
         account.setObjectName('secondaryButton')
         account.clicked.connect(self.show_account)
@@ -126,12 +153,16 @@ class DesktopWindow(QMainWindow):
         self.game.on_state_change = self.update_shell_status
         self.game.on_latency_change = self.update_shell_latency
         self.game.token.textChanged.connect(self.set_token)
+        # Private-key login obtains a short-lived game session without ever
+        # populating the manual Token field. Share that in-memory session with
+        # the embedded shop just like a pasted Token; never persist it.
+        self.game.bridge.signed_login.connect(self.on_signed_login)
         self.account_dialog = QDialog(self)
         self.account_dialog.setWindowTitle('统一账号连接')
         self.account_dialog.setMinimumWidth(520)
         account_layout = QVBoxLayout(self.account_dialog)
         account_layout.setSpacing(10)
-        account_layout.addWidget(QLabel('选择 Token 登录，或用 BSC 私钥在本机签名登录。'))
+        account_layout.addWidget(QLabel('默认使用 BSC 私钥签名。Token 登录只接受游戏会话 Token，请勿粘贴钱包私钥。'))
         account_layout.addWidget(QLabel('登录方式'))
         account_layout.addWidget(self.game.auth_method)
         self.account_token_label = QLabel('游戏会话 Token')
@@ -140,7 +171,7 @@ class DesktopWindow(QMainWindow):
         # Retain the familiar desktop account field reference for tests and
         # integrations while sharing the actual game login widget.
         self.account_token = self.game.token
-        self.account_private_key_label = QLabel('BSC 钱包私钥（仅本机签名，不会保存）')
+        self.account_private_key_label = QLabel('BSC 钱包私钥（仅本机签名；记住时使用主密码加密分片）')
         account_layout.addWidget(self.account_private_key_label)
         account_layout.addWidget(self.game.private_key)
         self.account_sign_help = QLabel(
@@ -148,6 +179,13 @@ class DesktopWindow(QMainWindow):
         )
         account_layout.addWidget(self.account_sign_help)
         account_layout.addWidget(self.game.remember_private_key)
+        initial_vault_status = ('保存状态：检测到加密分片，使用时输入主密码'
+                                if self.game.credential_vault.exists()
+                                else '保存状态：尚未保存；勾选后首次成功登录时设置主密码')
+        self.account_keyring_status = QLabel(initial_vault_status)
+        self.account_keyring_status.setObjectName('accountHint')
+        account_layout.addWidget(self.account_keyring_status)
+        self.game.bridge.keyring_status.connect(self.account_keyring_status.setText)
         account_layout.addWidget(self.game.auto_reconnect)
         self.game.auth_method.currentIndexChanged.connect(self.update_account_auth_fields)
         self.update_account_auth_fields()
@@ -169,9 +207,115 @@ class DesktopWindow(QMainWindow):
         self.game.connect_button.hide()
         self.game.disconnect_button.hide()
         self.game.set_state('未连接')
+        self.update_signals = UpdateSignals(self)
+        self.update_signals.checked.connect(self.on_update_checked)
+        self.update_signals.downloaded.connect(self.on_update_downloaded)
+        self.update_signals.failed.connect(self.on_update_failed)
+        self._update_release = None
+        self._update_archive = None
+        self._update_thread = None
         # The desktop monitor reads the same in-memory token used by the game.
         shop.read_token = lambda: ('Bearer ' + self._token) if self._token else ''
         shop.save_token = lambda value: None
+
+    def check_for_updates(self):
+        if self._update_thread and self._update_thread.is_alive():
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText('正在检查…')
+
+        def run_check():
+            try:
+                self.update_signals.checked.emit(fetch_latest_release())
+            except Exception as exc:
+                self.update_signals.failed.emit(f'{type(exc).__name__}: {exc}')
+
+        self._update_thread = threading.Thread(target=run_check, daemon=True,
+                                               name='tabby-update-check')
+        self._update_thread.start()
+
+    def on_update_checked(self, release):
+        self.update_button.setEnabled(True)
+        self.update_button.setText('检查更新')
+        self._update_release = release
+        if release.get('repository_unavailable'):
+            QMessageBox.warning(
+                self, '无法访问更新仓库',
+                'GitHub 返回 404：仓库可能是私有的，当前设备没有可用的 GitHub 登录。\n'
+                '请安装 GitHub CLI 并运行 gh auth login 后重试，或使用公开 Release。',
+            )
+            return
+        if release.get('no_release'):
+            QMessageBox.information(
+                self, '暂无可用更新',
+                'GitHub 仓库目前还没有公开的正式 Release。\n'
+                '发布新版桌面程序后，这里就能检查并安装更新。',
+            )
+            return
+        if not release.get('is_newer'):
+            QMessageBox.information(self, '检查更新', f'当前已是最新版本（{APP_VERSION}）。')
+            return
+        version = release.get('version', '未知')
+        asset = release.get('asset')
+        if not is_frozen_windows() or not asset:
+            QMessageBox.information(
+                self, '发现新版本',
+                f'GitHub 上有新版本 {version}。当前运行方式无法自动替换安装文件，\n'
+                '将打开 Release 页面供你获取对应平台版本。',
+            )
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+            return
+        answer = QMessageBox.question(
+            self, '发现新版本', f'发现 Tabby Desktop {version}，是否下载并安装？\n'
+            '安装完成后应用会自动重启。',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.download_update(asset)
+
+    def download_update(self, asset):
+        if self._update_thread and self._update_thread.is_alive():
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText('正在下载…')
+
+        def run_download():
+            try:
+                temp_dir = Path(tempfile.mkdtemp(prefix='tabby-release-'))
+                archive = download_asset(asset['browser_download_url'],
+                                         temp_dir / 'TabbyDesktop-windows-x64.zip')
+                self.update_signals.downloaded.emit(str(archive))
+            except Exception as exc:
+                self.update_signals.failed.emit(f'{type(exc).__name__}: {exc}')
+
+        self._update_thread = threading.Thread(target=run_download, daemon=True,
+                                               name='tabby-update-download')
+        self._update_thread.start()
+
+    def on_update_downloaded(self, archive_path):
+        self.update_button.setEnabled(True)
+        self.update_button.setText('检查更新')
+        try:
+            app_dir = Path(sys.executable).resolve().parent
+            script = prepare_windows_update(Path(archive_path), app_dir)
+            answer = QMessageBox.information(
+                self, '更新已下载', '更新包已下载并校验。点击“立即重启”完成安装。',
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                launch_update_script(script)
+                self.close()
+        except Exception as exc:
+            self.on_update_failed(f'{type(exc).__name__}: {exc}')
+
+    def on_update_failed(self, message):
+        self.update_button.setEnabled(True)
+        self.update_button.setText('检查更新')
+        if 'HTTP Error 403' in message:
+            message += '\nGitHub 暂时限制了匿名 API 请求，请稍后再试。'
+        QMessageBox.warning(self, '更新失败', f'无法完成 GitHub 更新：\n{message}')
 
     def show_account(self):
         self.account_dialog.show()
@@ -187,11 +331,59 @@ class DesktopWindow(QMainWindow):
         self.account_private_key_label.setVisible(private_mode)
         self.account_sign_help.setVisible(private_mode)
 
-    def set_token(self, value):
+    def set_token(self, value, guard_private_key=True):
         value = value.strip()
+        probe = value[7:].strip() if value.lower().startswith('bearer ') else value
+        candidate = probe[2:] if probe.lower().startswith('0x') else ''
+        has_wallet_prefix = len(candidate) == 64 and all(
+            ch in '0123456789abcdefABCDEF' for ch in candidate)
+        is_unprefixed_hex = len(probe) == 64 and all(
+            ch in '0123456789abcdefABCDEF' for ch in probe)
+        if guard_private_key and (has_wallet_prefix or is_unprefixed_hex):
+            # Common wallet private-key form. Stop it before it reaches the
+            # shared shop token or any network request.
+            if has_wallet_prefix:
+                use_as_token = False
+            else:
+                answer = QMessageBox.warning(
+                    self, '确认凭证类型',
+                    '检测到 64 位十六进制内容，可能是钱包私钥，也可能是游戏 Token。\n'
+                    '确认它是游戏 Token 才继续；否则清除并切换到私钥登录。',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                use_as_token = answer == QMessageBox.StandardButton.Yes
+            if not use_as_token:
+                self.game.token.blockSignals(True)
+                self.game.token.clear()
+                self.game.token.blockSignals(False)
+                self._token = ''
+                self.sync_shop_token()
+                self.game.auth_method.setCurrentIndex(
+                    self.game.auth_method.findData('private_key'))
+                self.update_account_auth_fields()
+                self.game.private_key.setFocus()
+                QMessageBox.information(
+                    self, '已阻止误用凭证',
+                    '内容已从 Token 框清除，没有同步到商城或发送网络。请确认登录方式后再粘贴。'
+                )
+                return
         self._token = value[7:].strip() if value.lower().startswith('bearer ') else value
         self.update_shell_status(self.game.status.text())
         self.sync_shop_token()
+
+    def on_signed_login(self, result):
+        if isinstance(result, dict) and result.get('ok') and result.get('token'):
+            # The server-issued game session is trusted application data; it
+            # may itself be a 64-character hex token and must bypass the
+            # paste-safety prompt used only for the editable Token field.
+            self.set_token(str(result['token']), guard_private_key=False)
+            if result.get('remembered'):
+                self.account_keyring_status.setText('保存状态：AES-GCM 已验证；三片已保存，主密码未保存')
+            elif result.get('remember_error'):
+                self.account_keyring_status.setText('保存状态：加密分片保存/校验失败；请重试')
+            elif not self.game.remember_private_key.isChecked():
+                self.account_keyring_status.setText('保存状态：本次未保存私钥')
 
     def update_shell_status(self, connection_state=None):
         state = connection_state or self.game.status.text()
@@ -296,6 +488,7 @@ class DesktopWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('Tabby Desktop')
+    app.setWindowIcon(QIcon(str(BASE_DIR / 'assets' / 'tabby-logo.png')))
     window = DesktopWindow()
     window.show()
     sys.exit(app.exec())

@@ -9,7 +9,8 @@ from http.server import ThreadingHTTPServer
 from urllib.request import urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QTableWidget, QTabWidget
+from PySide6.QtWidgets import (QApplication, QLabel, QMessageBox, QPushButton,
+                               QTableWidget, QTabWidget)
 from PySide6.QtCore import QEventLoop, QTimer
 from desktop import DesktopWindow, shop
 from game_client.wss_tester import QUALITY_NAMES_ZH, localized_item_name, quality_color
@@ -45,10 +46,55 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(shop.MONITOR.enabled)
         self.assertFalse(shop.MONITOR.auto_buy_enabled)
         self.assertEqual(self.window.tabs.count(), 2)
+        self.assertFalse(self.window.windowIcon().isNull())
+        self.assertTrue(self.window.update_button.text().startswith('检查更新'))
         self.assertTrue(self.window.game_nav.isChecked())
         self.assertTrue(self.window.game.dashboard_header.isHidden())
         self.window.game.set_state('已连接')
         self.assertIn('已连接', self.window.account_status.text())
+
+    def test_private_key_session_is_shared_with_shop_in_memory(self):
+        self.window.game.auth_method.setCurrentIndex(
+            self.window.game.auth_method.findData('private_key'))
+        self.window.game.bridge.signed_login.emit({
+            'ok': True, 'token': 'signed-game-session', 'address': '0x1234'
+        })
+        self.assertEqual(self.window._token, 'signed-game-session')
+        self.assertEqual(shop.read_token(), 'Bearer signed-game-session')
+        self.assertEqual(self.window.account_token.text(), '')
+        self.assertIn('Token 已设置', self.window.account_status.text())
+
+        # A rejected/failed signing attempt must not overwrite an existing
+        # usable session with an empty value.
+        self.window.on_signed_login({'ok': False, 'error': 'test'})
+        self.assertEqual(shop.read_token(), 'Bearer signed-game-session')
+
+    def test_private_key_auth_is_default_and_token_field_rejects_wallet_key_format(self):
+        game = self.window.game
+        self.assertEqual(game.auth_method.currentData(), 'private_key')
+        with patch.object(QMessageBox, 'warning') as warning, \
+             patch.object(QMessageBox, 'information') as information:
+            self.window.account_token.setText('0x' + 'a' * 64)
+        self.assertEqual(self.window.account_token.text(), '')
+        self.assertEqual(game.auth_method.currentData(), 'private_key')
+        self.assertEqual(shop.read_token(), '')
+        warning.assert_not_called()
+        information.assert_called_once()
+
+    def test_unprefixed_hex_token_requires_explicit_confirmation(self):
+        with patch.object(QMessageBox, 'warning',
+                          return_value=QMessageBox.StandardButton.No), \
+             patch.object(QMessageBox, 'information'):
+            self.window.account_token.setText('b' * 64)
+        self.assertEqual(self.window.account_token.text(), '')
+        self.assertEqual(shop.read_token(), '')
+
+    def test_server_issued_hex_session_bypasses_paste_safety_prompt(self):
+        server_token = 'c' * 64
+        with patch.object(QMessageBox, 'warning') as warning:
+            self.window.on_signed_login({'ok': True, 'token': server_token})
+        warning.assert_not_called()
+        self.assertEqual(shop.read_token(), 'Bearer ' + server_token)
 
     def test_local_handler_does_not_expose_files(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), self.window.make_handler())
@@ -276,6 +322,164 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('最近目标 骷髅怪', game.live_telemetry.text())
         self.assertIn('5 单位', game.live_telemetry.text())
         self.assertIn('可攻击', game.live_telemetry.text())
+
+    def test_compact_monster_deltas_survive_travel_and_keep_unchanged_rows(self):
+        game = self.window.game
+        game.current_map = 1
+        game.world_ready = True
+        game.update_monsters({'monsters': [
+            {'encounterId': 'map-1-monster', 'name': 'skeleton', 'mapId': 1,
+             'x': 10, 'y': 20, 'health': 100, 'maxHealth': 100},
+            {'encounterId': 'map-2-monster', 'name': 'skeleton', 'mapId': 2,
+             'x': 30, 'y': 40, 'health': 100, 'maxHealth': 100},
+        ]})
+
+        # The live Godot client preserves its snapshot cache across travel;
+        # v2 frames only carry changed monster rows.
+        game.pending_destination = 2
+        game.accept_packet({'type': 'travel_result', 'ok': True,
+                            'x': 30, 'y': 40, 'revision': 2})
+        self.assertEqual(game.current_map, 2)
+        self.assertIn('map-2-monster', game.monsters)
+
+        # deltaVersion=2 is the protocol's compact marker. An unchanged row
+        # must remain available even when a later packet updates another row.
+        game.update_monsters({'delta': True, 'deltaVersion': 2, 'monsters': [
+            {'encounterId': 'map-2-monster', 'health': 75},
+        ]})
+        self.assertEqual(game.monsters['map-2-monster']['health'], 75)
+        self.assertEqual(game.monsters['map-2-monster']['x'], 30)
+        self.assertIn('map-1-monster', game.monsters)
+        self.assertEqual(game.monster_table.rowCount(), 1)
+
+    def test_full_monster_snapshot_replaces_delta_cache(self):
+        game = self.window.game
+        game.current_map = 2
+        game.world_ready = True
+        game.update_monsters({'delta': False, 'deltaVersion': 2, 'monsters': [
+            {'encounterId': 'old-monster', 'name': 'skeleton', 'mapId': 2,
+             'x': 10, 'y': 20, 'health': 100},
+        ]})
+        game.update_monsters({'delta': False, 'deltaVersion': 2, 'monsters': [
+            {'encounterId': 'new-monster', 'name': 'skeleton', 'mapId': 2,
+             'x': 30, 'y': 40, 'health': 100},
+        ]})
+        self.assertEqual(set(game.monsters), {'new-monster'})
+        self.assertEqual(game.monster_table.rowCount(), 1)
+
+    def test_auto_combat_patrols_when_snowfield_has_no_monsters(self):
+        game = self.window.game
+        game.ws = object()
+        game.world_ready = True
+        game.current_map = 2
+        game.world_x, game.world_y = 3872, 7488
+        game.auto_attack.blockSignals(True)
+        game.auto_attack.setChecked(True)
+        game.auto_attack.blockSignals(False)
+        game.next_attack = {}
+
+        with patch('game_client.wss_tester.find_map_path', return_value=[(3872, 7168)]):
+            game.auto_attack_tick()
+        self.assertTrue(game.patrol_timer.isActive())
+        self.assertEqual(game.patrol_route, [(3872, 7168)])
+
+        game.monsters = {'new-monster': {
+            'encounterId': 'new-monster', 'mapId': 2, 'x': 3872,
+            'y': 7488, 'health': 100, 'monsterRank': 'NORMAL',
+        }}
+        game.auto_attack_tick()
+        self.assertFalse(game.patrol_timer.isActive())
+        self.assertIn('等待服务端攻击票据', game.combat_status.text())
+        game.stop_patrol(reset_anchor=True)
+        game.combat_timer.stop()
+        game.ws = None
+
+    def test_auto_reconnect_continues_after_many_failures(self):
+        game = self.window.game
+        game.manual_disconnect = False
+        game.auto_reconnect.setChecked(True)
+        game._reconnect_attempt = 8
+        game.schedule_auto_reconnect()
+        self.assertTrue(game.reconnect_timer.isActive())
+        self.assertEqual(game._reconnect_attempt, 9)
+        self.assertEqual(game.reconnect_timer.interval(), 60000)
+        game.reconnect_timer.stop()
+
+    def test_rejected_token_stops_reconnecting_same_credential(self):
+        game = self.window.game
+        game.manual_disconnect = False
+        game.auto_reconnect.setChecked(True)
+        game.auth_method.setCurrentIndex(game.auth_method.findData('token'))
+        game.auth_rejected = True
+
+        game.on_connect_failed()
+
+        self.assertFalse(game.reconnect_timer.isActive())
+        self.assertFalse(game._auto_reconnect_login)
+        self.assertIn('登录凭证已失效', game.status.text())
+
+    def test_rejected_saved_wallet_reauthenticates_only_once(self):
+        game = self.window.game
+        game.manual_disconnect = False
+        game.auto_reconnect.setChecked(True)
+        game.auth_method.setCurrentIndex(game.auth_method.findData('private_key'))
+        game.remember_private_key.setChecked(True)
+
+        with patch('game_client.wss_tester.QTimer.singleShot') as single_shot:
+            game.auth_rejected = True
+            game.on_connect_failed()
+            self.assertTrue(game._auth_retry_attempted)
+            self.assertTrue(game._auto_reconnect_login)
+            single_shot.assert_called_once_with(0, game.retry_connection)
+
+            # If a freshly signed session is also rejected, stop instead of looping.
+            game.auth_rejected = True
+            game.on_connect_failed()
+
+        self.assertFalse(game.reconnect_timer.isActive())
+        self.assertFalse(game._auto_reconnect_login)
+        self.assertEqual(single_shot.call_count, 1)
+        self.assertIn('登录凭证已失效', game.status.text())
+
+    def test_missing_pong_marks_connection_dead_and_reconnects(self):
+        game = self.window.game
+
+        class StalledSocket:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        stalled = StalledSocket()
+        game.ws = stalled
+        game.world_ready = True
+        game.last_pong_received_at = __import__('time').monotonic() - 13
+        game.send_keepalive()
+        self.assertTrue(stalled.closed)
+        self.assertIsNone(game.ws)
+        self.assertTrue(game.reconnect_timer.isActive())
+        game.reconnect_timer.stop()
+
+    def test_invalid_target_does_not_mark_cached_monster_as_dead(self):
+        game = self.window.game
+        encounter_id = 'still-alive'
+        game.current_map = 1
+        game.world_x, game.world_y = 10, 10
+        game.monsters = {encounter_id: {
+            'encounterId': encounter_id, 'name': 'skeleton', 'mapId': 1,
+            'x': 20, 'y': 20, 'health': 80, 'maxHealth': 100,
+        }}
+        game.refresh_monster_table()
+        game.last_attacked_monster = encounter_id
+        game.last_attack_ticket = 'ticket-1'
+        game.used_attack_tickets.add('ticket-1')
+        game.accept_packet({'type': 'error', 'action': 'monsterAttack',
+                            'code': 'invalid_target',
+                            'nextAttack': {'id': 'ticket-1'}})
+        self.assertEqual(game.monsters[encounter_id]['health'], 80)
+        self.assertEqual(game.monster_table.rowCount(), 1)
+        self.assertGreater(game.invalid_target_until[encounter_id], __import__('time').monotonic())
+        self.assertNotIn('ticket-1', game.used_attack_tickets)
 
 
 if __name__ == '__main__':

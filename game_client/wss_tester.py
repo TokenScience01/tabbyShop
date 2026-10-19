@@ -8,6 +8,7 @@ from collections import deque
 import math
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import struct
@@ -23,6 +24,7 @@ from minimap import TacticalMap
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings
 from PySide6.QtGui import QColor, QIcon, QPixmap
+from credential_vault import CredentialVault
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QPlainTextEdit,
     QScrollArea,
@@ -222,6 +225,7 @@ class Bridge(QObject):
     profile = Signal(object)
     signed_login = Signal(object)
     sign_challenge = Signal(object)
+    keyring_status = Signal(str)
 
 
 MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地",
@@ -334,9 +338,14 @@ class MainWindow(QMainWindow):
         self.session_token = ""
         self.signed_session_token = ""
         self._resolved_token = ""
+        self.credential_vault = CredentialVault()
+        self._vault_passphrase: str | None = None
         self.manual_disconnect = False
         self._auto_reconnect_login = False
         self._reconnect_attempt = 0
+        self.last_pong_received_at = 0.0
+        self.auth_rejected = False
+        self._auth_retry_attempted = False
         self.settings = QSettings("Tabby", "TabbyDesktop")
         self.reset_world_state()
         self.keepalive = QTimer(self)
@@ -356,9 +365,17 @@ class MainWindow(QMainWindow):
         self.chase_timer.setInterval(66)
         self.chase_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.chase_timer.timeout.connect(self.advance_chase)
+        self.patrol_timer = QTimer(self)
+        self.patrol_timer.setInterval(66)
+        self.patrol_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.patrol_timer.timeout.connect(self.advance_patrol)
         self.reconnect_timer = QTimer(self)
         self.reconnect_timer.setSingleShot(True)
         self.reconnect_timer.timeout.connect(self.retry_connection)
+        self.connection_stable_timer = QTimer(self)
+        self.connection_stable_timer.setSingleShot(True)
+        self.connection_stable_timer.setInterval(30000)
+        self.connection_stable_timer.timeout.connect(self.reset_reconnect_backoff)
         self.telemetry_timer = QTimer(self)
         self.telemetry_timer.setInterval(300)
         self.telemetry_timer.timeout.connect(self.update_live_telemetry)
@@ -407,19 +424,19 @@ class MainWindow(QMainWindow):
         self.token = QLineEdit()
         self.token.setMinimumHeight(38)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token.setPlaceholderText("粘贴游戏 Token，点击连接；仅保存在当前进程")
+        self.token.setPlaceholderText("仅粘贴游戏会话 Token；钱包私钥请用私钥登录方式")
         self.auth_method = QComboBox()
-        self.auth_method.addItem("Token 登录", "token")
         self.auth_method.addItem("BSC 私钥签名", "private_key")
-        self.auth_method.setToolTip("私钥仅在本机用于签名，不会发送给服务器或保存到磁盘。")
+        self.auth_method.addItem("Token 登录", "token")
+        self.auth_method.setToolTip("私钥仅在本机用于签名，不会发送给服务器；记住时会用独立主密码加密分片保存。")
         self.private_key = QLineEdit()
         self.private_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.private_key.setPlaceholderText("输入 EVM 私钥（BSC / chainId 56），仅用于本次签名")
+        self.private_key.setPlaceholderText("输入 EVM 私钥（BSC / chainId 56）；记住时用主密码加密分片")
         self.private_key.textEdited.connect(self.invalidate_signed_session)
         private_key_label = QLabel("钱包私钥（本机签名）")
         private_key_label.setObjectName("fieldLabel")
         origin_label = QLabel("Origin")
-        token_label = QLabel("游戏会话 token")
+        token_label = QLabel("游戏会话 Token（不要粘贴钱包私钥）")
         for label in (origin_label, token_label):
             label.setObjectName("fieldLabel")
         fields.addWidget(origin_label, 0, 0)
@@ -443,9 +460,12 @@ class MainWindow(QMainWindow):
         self.auto_reconnect.setToolTip("手动断开除外。启用钱包记忆后，重连时可自动刷新签名会话。")
         self.auto_reconnect.toggled.connect(lambda checked: self.settings.setValue("autoReconnect", checked))
         card_layout.addWidget(self.auto_reconnect)
-        self.remember_private_key = QCheckBox("记住钱包私钥（系统钥匙串）")
+        self.remember_private_key = QCheckBox("记住私钥（主密码加密 + 三片分开保存）")
         self.remember_private_key.setChecked(self.settings.value("rememberPrivateKey", False, type=bool))
-        self.remember_private_key.setToolTip("仅保存到系统钥匙串/凭据管理器；不会写入应用配置文件。")
+        self.remember_private_key.setToolTip(
+            "登录成功后用你设置的主密码进行 AES-GCM 加密，并将密文拆成三片保存。"
+            "主密码不会保存；读取时需要输入。取消勾选会删除三片数据。"
+        )
         self.remember_private_key.toggled.connect(self.on_remember_private_key_toggled)
         card_layout.addWidget(self.remember_private_key)
 
@@ -515,6 +535,7 @@ class MainWindow(QMainWindow):
         advanced_layout.addWidget(advanced_close, 0, Qt.AlignmentFlag.AlignRight)
         self.advanced_button.clicked.connect(self.advanced_dialog.open)
         self.auth_method.currentIndexChanged.connect(self.update_auth_fields)
+        self.update_auth_fields()
 
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 4, 0, 0)
@@ -786,7 +807,7 @@ class MainWindow(QMainWindow):
         combat_controls.addWidget(self.encounter_id_toggle)
         combat_controls.addStretch(1)
         combat_layout.addLayout(combat_controls)
-        combat_hint = QLabel("自动模式会搜索当前地图收到的全部怪物；进入 70 单位后使用服务端票据攻击。无可用怪物时暂不巡逻。")
+        combat_hint = QLabel("自动模式会搜索并追击当前地图怪物；北部雪地暂无怪物时会沿已验证路线巡逻搜索。")
         combat_hint.setObjectName("subtitle")
         combat_layout.addWidget(combat_hint)
         outer.addWidget(combat_card)
@@ -1418,7 +1439,8 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(False)
         self.manual_disconnect = False
         self._auto_reconnect_login = False
-        self._reconnect_attempt = 0
+        self.last_pong_received_at = time.monotonic()
+        self.connection_stable_timer.start()
         self.reconnect_timer.stop()
         self.active_url.setText(ws.url)
         self.active_url.setToolTip(ws.url)
@@ -1431,27 +1453,49 @@ class MainWindow(QMainWindow):
         self.reader.start()
 
     def on_connect_failed(self) -> None:
+        self.connection_stable_timer.stop()
         self.keepalive.stop()
         self.reset_world_state()
         self.update_map_buttons()
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
         self.send_button.setEnabled(False)
+        if self.auth_rejected:
+            self.auth_rejected = False
+            can_refresh_signed_session = (
+                self.auth_method.currentData() == "private_key"
+                and self.remember_private_key.isChecked()
+                and not self._auth_retry_attempted
+            )
+            if can_refresh_signed_session:
+                self._auth_retry_attempted = True
+                self._auto_reconnect_login = True
+                self.append_log("服务端拒绝当前会话；使用已记住的私钥重新签名登录一次。")
+                QTimer.singleShot(0, self.retry_connection)
+                return
+            self._auto_reconnect_login = False
+            self.reconnect_timer.stop()
+            message = "登录凭证已失效 · 请重新签名或更新 Token"
+            self.append_log("服务端返回 login_required；已停止重复使用同一 Token 重连。")
+            self.bridge.state.emit(message)
+            return
         self.schedule_auto_reconnect()
 
     def schedule_auto_reconnect(self) -> None:
         if self.manual_disconnect or not self.auto_reconnect.isChecked():
             self._auto_reconnect_login = False
             return
-        if self._reconnect_attempt >= 8:
-            self.append_log("自动重连连续失败 8 次，已暂停；请检查网络或手动重试。")
-            self._auto_reconnect_login = False
-            return
-        delay = min(30, 2 ** self._reconnect_attempt)
+        # Keep retrying through transient outages. Backoff tops out at one
+        # minute instead of permanently giving up after a small fixed count.
+        delay = min(60, 2 ** min(self._reconnect_attempt, 6))
         self._reconnect_attempt += 1
         self.append_log(f"{delay} 秒后自动重连（第 {self._reconnect_attempt} 次）。")
         self.bridge.state.emit(f"{delay} 秒后自动重连…")
         self.reconnect_timer.start(delay * 1000)
+
+    def reset_reconnect_backoff(self) -> None:
+        if self.ws is not None:
+            self._reconnect_attempt = 0
 
     def retry_connection(self) -> None:
         if self.manual_disconnect or not self.auto_reconnect.isChecked():
@@ -1465,18 +1509,48 @@ class MainWindow(QMainWindow):
     def on_remember_private_key_toggled(self, checked: bool) -> None:
         self.settings.setValue("rememberPrivateKey", checked)
         if checked:
+            if self.credential_vault.exists():
+                self.bridge.keyring_status.emit("检测到加密分片；登录时需要输入主密码。")
+            else:
+                self.bridge.keyring_status.emit("已开启；首次保存时会要求设置独立主密码。")
             return
+        self._vault_passphrase = None
+        self.credential_vault.delete()
         try:
             secure_keyring().delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
-            self.append_log("已从系统钥匙串删除已记住的钱包私钥。")
         except Exception:
-            # No saved entry is the common case; avoid leaking backend details.
+            # Remove legacy credentials from older releases when possible.
             pass
+        self.append_log("已请求删除本机保存的私钥分片。")
+        self.bridge.keyring_status.emit("已删除本机保存的私钥分片。")
+
+    def ask_vault_passphrase(self, confirm: bool) -> str | None:
+        phrase, accepted = QInputDialog.getText(
+            self, "私钥保险库主密码", "请输入独立主密码（至少 6 位，不会保存）：",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted:
+            return None
+        if len(phrase) < 6:
+            QMessageBox.warning(self, "主密码太短", "请设置至少 6 位的独立主密码。")
+            return None
+        if confirm:
+            repeated, accepted = QInputDialog.getText(
+                self, "确认主密码", "请再次输入主密码：", QLineEdit.EchoMode.Password,
+            )
+            if not accepted:
+                return None
+            if phrase != repeated:
+                QMessageBox.warning(self, "主密码不一致", "两次输入的主密码不一致；没有保存私钥。")
+                return None
+        return phrase
 
     def connect_ws(self) -> None:
         if not self._auto_reconnect_login:
             self.reconnect_timer.stop()
             self._reconnect_attempt = 0
+            self._auth_retry_attempted = False
+        self.auth_rejected = False
         if self.auth_method.currentData() == "private_key" and not self._resolved_token:
             if self.signed_session_token:
                 self._resolved_token = self.signed_session_token
@@ -1587,6 +1661,9 @@ class MainWindow(QMainWindow):
         private_mode = self.auth_method.currentData() == "private_key"
         self.token.setVisible(not private_mode)
         self.private_key.setVisible(private_mode)
+        if not private_mode:
+            self.private_key.clear()
+            self._vault_passphrase = None
 
     def invalidate_signed_session(self, *_args) -> None:
         self.signed_session_token = ""
@@ -1608,22 +1685,55 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "需要安全连接", "私钥签名登录只允许通过 wss:// 地址发起。")
             return
         private_key = self.private_key.text().strip()
-        if not private_key and self.remember_private_key.isChecked():
+        remember_private_key = self.remember_private_key.isChecked()
+        vault_passphrase = None
+        if not private_key and remember_private_key and self.credential_vault.exists():
+            vault_passphrase = self._vault_passphrase
+            if not vault_passphrase:
+                vault_passphrase = self.ask_vault_passphrase(confirm=False)
+                if vault_passphrase is None:
+                    return
             try:
-                private_key = secure_keyring().get_password(KEYRING_SERVICE, KEYRING_ACCOUNT) or ""
-            except Exception:
-                QMessageBox.warning(self, "系统钥匙串不可用", "无法读取已记住的私钥。请检查系统钥匙串，或重新输入私钥。")
+                private_key = self.credential_vault.load(vault_passphrase)
+                self.bridge.keyring_status.emit("主密码验证成功；已从加密分片读取私钥。")
+            except (OSError, ValueError) as exc:
+                self._vault_passphrase = None
+                QMessageBox.warning(self, "无法解锁私钥", str(exc))
+                self.bridge.keyring_status.emit("解锁失败；请确认主密码或检查分片文件。")
                 return
+        elif not private_key and remember_private_key:
+            # One-time migration from releases that kept the credential in
+            # the OS keyring. New writes always go to the passphrase vault.
+            try:
+                legacy_key = secure_keyring().get_password(KEYRING_SERVICE, KEYRING_ACCOUNT) or ""
+            except Exception:
+                legacy_key = ""
+                self.bridge.keyring_status.emit("旧版系统凭据不可读取；请输入私钥以迁移到加密分片。")
+            if legacy_key:
+                vault_passphrase = self.ask_vault_passphrase(confirm=True)
+                if vault_passphrase is None:
+                    return
+                private_key = legacy_key
+                legacy_key = ""
+                self.bridge.keyring_status.emit("发现旧版保存项；成功登录后会迁移为主密码加密分片。")
         if not private_key:
             QMessageBox.information(self, "需要私钥", "请输入用于本机签名的钱包私钥。")
             return
+        if remember_private_key:
+            if vault_passphrase is None:
+                vault_passphrase = self.ask_vault_passphrase(confirm=True)
+                if vault_passphrase is None:
+                    return
+            self._vault_passphrase = vault_passphrase
+        else:
+            self._vault_passphrase = None
         self.private_key.clear()
-        remember_private_key = self.remember_private_key.isChecked()
         automatic_reauth = self._auto_reconnect_login and remember_private_key
         api_path = parsed.path.rstrip("/")
         if api_path.endswith("/realtime"):
             api_path = api_path[:-len("/realtime")]
         api_base = urllib.parse.urlunsplit(("https", parsed.netloc, api_path, "", ""))
+        api_origin = urllib.parse.urlunsplit(("https", parsed.netloc, "", "", ""))
         self.keepalive.stop()
         self.reset_world_state()
         self.update_map_buttons()
@@ -1640,24 +1750,48 @@ class MainWindow(QMainWindow):
                 account = Account.from_key(key_material)
 
                 def request(path: str, body: dict, bearer: str | None = None) -> dict:
-                    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+                    # The membership API applies browser-origin validation.
+                    # The game client itself does not need these headers for
+                    # the WebSocket, but the HTTP signature endpoints do.
+                    headers = {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "Origin": api_origin,
+                        "Referer": api_origin + "/",
+                    }
                     if bearer:
                         headers["Authorization"] = "Bearer " + bearer
                     request_body = json.dumps(body).encode("utf-8")
-                    req = urllib.request.Request(api_base + path, data=request_body,
-                                                 headers=headers, method="POST")
-                    try:
-                        with urllib.request.urlopen(req, timeout=15) as response:
-                            result = json.loads(response.read().decode("utf-8"))
-                    except urllib.error.HTTPError as exc:
-                        raw = exc.read().decode("utf-8", errors="replace")
+                    result = None
+                    for attempt in range(3):
+                        req = urllib.request.Request(api_base + path, data=request_body,
+                                                     headers=headers, method="POST")
                         try:
-                            error_data = json.loads(raw)
-                        except (TypeError, ValueError):
-                            error_data = {"message": raw[:300]}
-                        code = error_data.get("code", "") if isinstance(error_data, dict) else ""
-                        message = error_data.get("message", "") if isinstance(error_data, dict) else ""
-                        raise RuntimeError(str(code or message or f"HTTP {exc.code}")) from None
+                            with urllib.request.urlopen(req, timeout=15) as response:
+                                result = json.loads(response.read().decode("utf-8"))
+                            break
+                        except urllib.error.HTTPError as exc:
+                            # A challenge is safe to request again. Avoid
+                            # replaying verify/enter: a gateway may have lost
+                            # its response after consuming their one-time data.
+                            if path == "/membership/challenge" and exc.code in (502, 503, 504) and attempt < 2:
+                                exc.close()
+                                time.sleep(0.5 * (attempt + 1))
+                                continue
+                            raw = exc.read().decode("utf-8", errors="replace")
+                            try:
+                                error_data = json.loads(raw)
+                            except (TypeError, ValueError):
+                                if "html" in str(exc.headers.get("Content-Type", "")).lower():
+                                    title = re.search(r"<title[^>]*>(.*?)</title>", raw, re.IGNORECASE | re.DOTALL)
+                                    detail = re.sub(r"\s+", " ", title.group(1)).strip() if title else "服务器返回了 HTML 错误页"
+                                    error_data = {"message": detail[:180]}
+                                else:
+                                    error_data = {"message": re.sub(r"\s+", " ", raw).strip()[:180]}
+                            code = error_data.get("code", "") if isinstance(error_data, dict) else ""
+                            message = error_data.get("message", "") if isinstance(error_data, dict) else ""
+                            detail = str(code or message or f"HTTP {exc.code}")
+                            raise RuntimeError(f"{path}: {detail}") from None
                     if not isinstance(result, dict):
                         raise RuntimeError("服务端返回格式无效")
                     if result.get("code") and not result.get("walletToken") and not result.get("token"):
@@ -1676,7 +1810,9 @@ class MainWindow(QMainWindow):
                 if not approval.wait(timeout=180) or not approval_data["approved"]:
                     raise RuntimeError("已取消签名登录")
                 signed = Account.sign_message(encode_defunct(text=message), key_material)
-                signature = signed.signature.hex()
+                # eth-account's HexBytes.hex() may omit the 0x marker, while
+                # the membership verifier expects an RPC-style hex signature.
+                signature = "0x" + bytes(signed.signature).hex()
                 verification = request("/membership/verify", {
                     "challengeId": challenge_id, "signature": signature, "chainId": 56
                 })
@@ -1688,14 +1824,25 @@ class MainWindow(QMainWindow):
                 if not game_token:
                     raise RuntimeError("入场验证未返回游戏会话 token；请确认钱包具备测试服资格")
                 remember_error = ""
+                remembered = False
                 if remember_private_key:
                     try:
-                        secure_keyring().set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, key_material)
+                        self.credential_vault.store(key_material, vault_passphrase)
+                        remembered = self.credential_vault.load(vault_passphrase) == key_material
+                        if not remembered:
+                            raise RuntimeError("加密分片写入后校验失败")
+                        try:
+                            # Clean up the legacy system-keyring copy created by
+                            # older versions; the new vault no longer depends on it.
+                            secure_keyring().delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+                        except Exception:
+                            pass
                     except Exception:
-                        remember_error = "登录成功，但系统钥匙串保存失败；私钥未被记住。"
+                        remember_error = "登录成功，但加密分片保存或校验失败；私钥未被记住。"
                 self.bridge.signed_login.emit({"ok": True, "token": str(game_token),
                                                "address": account.address,
-                                               "remember_error": remember_error})
+                                               "remember_error": remember_error,
+                                               "remembered": remembered})
             except Exception as exc:
                 self.bridge.signed_login.emit({"ok": False,
                                                "error": f"{type(exc).__name__}: {exc}"})
@@ -1724,6 +1871,8 @@ class MainWindow(QMainWindow):
     def finish_signed_login(self, result: dict) -> None:
         self.connect_button.setEnabled(True)
         if not isinstance(result, dict) or not result.get("ok"):
+            self._vault_passphrase = None
+            self.bridge.keyring_status.emit("登录未完成；本次私钥不会写入加密分片。")
             error = result.get("error", "签名登录失败") if isinstance(result, dict) else "签名登录失败"
             self.bridge.state.emit("签名登录失败")
             self.append_log("签名登录失败：" + str(error))
@@ -1739,6 +1888,10 @@ class MainWindow(QMainWindow):
         address = str(result.get("address", ""))
         if result.get("remember_error"):
             self.append_log(str(result["remember_error"]))
+            self.bridge.keyring_status.emit("保存失败；请确认磁盘权限后重试。")
+        elif result.get("remembered"):
+            self.append_log("钱包私钥已加密分片保存并完成解密校验；主密码未写入磁盘。")
+            self.bridge.keyring_status.emit("AES-GCM 校验成功；三片密文已保存。")
         self.append_log(f"钱包签名验证成功：{address[:8]}…{address[-6:]}；游戏 token 已留在内存中。")
         self._resolved_token = self.session_token
         self.connect_ws()
@@ -1754,6 +1907,13 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         packet = None
                     if isinstance(packet, dict):
+                        # The server commonly follows login_required with a
+                        # policy-close immediately. Record this on the socket
+                        # reader thread before queueing Qt signals so the
+                        # close handler cannot mistake it for a transient drop
+                        # and retry the exact same rejected credential.
+                        if packet.get("type") == "error" and packet.get("code") == "login_required":
+                            self.auth_rejected = True
                         self.bridge.packet.emit(packet)
                     if not isinstance(packet, dict) or packet.get("type") not in ("snapshot", "pong"):
                         self.bridge.log.emit("RECV text: " + text)
@@ -1792,7 +1952,9 @@ class MainWindow(QMainWindow):
     def disconnect_ws(self) -> None:
         self.manual_disconnect = True
         self._auto_reconnect_login = False
+        self._vault_passphrase = None
         self.reconnect_timer.stop()
+        self.connection_stable_timer.stop()
         self.keepalive.stop()
         self.position_sync_timer.stop()
         ws, self.ws = self.ws, None
@@ -1814,6 +1976,8 @@ class MainWindow(QMainWindow):
             self.combat_timer.stop()
         if hasattr(self, "chase_timer"):
             self.chase_timer.stop()
+        if hasattr(self, "patrol_timer"):
+            self.patrol_timer.stop()
         if hasattr(self, "position_sync_timer"):
             self.position_sync_timer.stop()
         self.world_ready = False
@@ -1866,6 +2030,12 @@ class MainWindow(QMainWindow):
         self.chase_route = []
         self.last_chase_at = None
         self.chase_retry_after = 0.0
+        self.patrol_route = []
+        self.patrol_anchor = None
+        self.patrol_direction_index = 0
+        self.patrol_ring = 320.0
+        self.patrol_last_at = None
+        self.patrol_retry_after = 0.0
         self.invalid_target_until = {}
         if hasattr(self, "monster_table"):
             self.monster_table.setRowCount(0)
@@ -1918,6 +2088,7 @@ class MainWindow(QMainWindow):
     def accept_packet(self, packet: dict) -> None:
         kind = packet.get("type")
         if kind == "pong":
+            self.last_pong_received_at = time.monotonic()
             try:
                 sent_at = int(packet.get("sentAt"))
                 started = self.pending_pings.pop(sent_at, None)
@@ -1929,6 +2100,10 @@ class MainWindow(QMainWindow):
             latency_callback = getattr(self, "on_latency_change", None)
             if callable(latency_callback):
                 latency_callback()
+        elif kind == "error" and packet.get("code") == "login_required":
+            self.auth_rejected = True
+            self.bridge.state.emit("服务器拒绝登录凭证…")
+            self.append_log("服务端拒绝游戏会话 Token：login_required。")
         elif kind == "welcome" and isinstance(packet.get("position"), dict):
             self.welcome_at = time.monotonic()
             position = packet["position"]
@@ -1980,6 +2155,7 @@ class MainWindow(QMainWindow):
                     detected_death = not self.respawn_pending and self.respawn_attempts < 3
                     self.move_timer.stop()
                     self.stop_chase()
+                    self.stop_patrol(reset_anchor=True)
                     self.position_sync_timer.stop()
                     self.combat_timer.stop()
                 elif operation == "respawn":
@@ -1993,7 +2169,6 @@ class MainWindow(QMainWindow):
                     self.combat_generation += 1
                     self.used_attack_tickets.clear()
                     self.attack_busy_until = 0.0
-                    self.monsters.clear()
                     position = packet.get("position")
                     if isinstance(position, dict):
                         self.current_map = int(position.get("map", 1))
@@ -2027,6 +2202,7 @@ class MainWindow(QMainWindow):
                         self.claim_encounter_reward(encounter_id)
             if not self.world_ready:
                 self.world_ready = True
+                self._auth_retry_attempted = False
                 self.append_log("游戏世界已就绪；后续高频 snapshot 已折叠。")
                 self.keepalive.start()
                 self.telemetry_timer.start()
@@ -2050,6 +2226,7 @@ class MainWindow(QMainWindow):
         elif kind == "travel_result":
             self.move_timer.stop()
             self.stop_chase()
+            self.stop_patrol(reset_anchor=True)
             destination = self.pending_destination
             self.pending_destination = None
             self.pending_portal = None
@@ -2061,7 +2238,6 @@ class MainWindow(QMainWindow):
                 self.world_y = packet.get("y", self.world_y)
                 self.movement_revision = int(packet.get("revision", self.movement_revision))
                 self.position_estimated = False
-                self.monsters.clear()
                 self.refresh_monster_table()
                 self.travel_status.setText(f"已进入 {MAP_NAMES.get(self.current_map, str(self.current_map))}；服务端已确认。")
             else:
@@ -2120,15 +2296,12 @@ class MainWindow(QMainWindow):
                 self.invalid_target_until[rejected_id] = time.monotonic() + 15.0
                 monster = self.monsters.get(rejected_id, {})
                 distance = self.monster_distance(monster) if monster else math.inf
-                # A rejected encounter can remain in a delta-snapshot cache
-                # with stale positive health. Don't select it again from that
-                # stale row; a later authoritative snapshot can replace it.
-                if monster:
-                    monster["health"] = 0
-                    self.refresh_monster_table()
+                # Do not invent a death locally. Compact snapshots may not
+                # resend an unchanged living monster, so setting health=0
+                # here could hide it forever. Skip it temporarily instead.
                 self.combat_status.setText(
                     f"目标 {rejected_id[:8]} 已不被服务端接受（可能刚被击败或离开攻击范围）；"
-                    f"暂时跳过并等待新快照。当前记录距离 {distance:.0f}。"
+                    f"暂时跳过 15 秒。当前记录距离 {distance:.0f}。"
                 )
                 self.append_log(f"攻击目标诊断：invalid_target；id={rejected_id}；距离={distance:.1f}；"
                                 f"地图={self.current_map}；本地血量={monster.get('health', '?')}")
@@ -3179,20 +3352,29 @@ class MainWindow(QMainWindow):
         rows = packet.get("monsters", [])
         if not isinstance(rows, list):
             return
-        compact = bool(packet.get("delta")) and int(packet.get("deltaVersion", 0)) == 2
-        cache = dict(self.monsters) if compact else {}
+        # Mirror pvp_client.gd's expand_snapshot_rows: a non-delta snapshot
+        # starts a fresh cache, while delta frames merge into the existing
+        # cache. v2 returns the complete expanded cache; older formats prune
+        # rows absent from the frame.
+        compact = int(packet.get("deltaVersion", 0)) == 2
+        is_delta = bool(packet.get("delta", False))
+        cache = dict(self.monsters) if is_delta else {}
         for removed in packet.get("removedMonsters", []):
             cache.pop(str(removed), None)
+        present_ids = set()
         for row in rows:
             if not isinstance(row, dict) or not row.get("encounterId"):
                 continue
             encounter_id = str(row["encounterId"])
+            present_ids.add(encounter_id)
             merged = dict(cache.get(encounter_id, {}))
             merged.update(row)
             cache[encounter_id] = merged
             if encounter_id not in self.seen_monsters and int(merged.get("health", 0)) > 0:
                 self.seen_monsters.add(encounter_id)
                 self.append_log(f"发现怪物：{localized_monster_name(merged)} · {encounter_id[:8]} · 地图 {merged.get('mapId', '?')}")
+        if not compact:
+            cache = {key: value for key, value in cache.items() if key in present_ids}
         self.monsters = cache
         self.refresh_monster_table()
         self.update_live_telemetry()
@@ -3378,6 +3560,7 @@ class MainWindow(QMainWindow):
         else:
             self.combat_timer.stop()
             self.stop_chase()
+            self.stop_patrol(reset_anchor=True)
             if not enabled:
                 self.combat_status.setText("自动攻击已关闭。")
 
@@ -3394,14 +3577,13 @@ class MainWindow(QMainWindow):
         if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
             self.combat_timer.stop()
             self.stop_chase()
+            self.stop_patrol(reset_anchor=True)
             self.combat_status.setText("任务有限模式：当前没有未完成的怪物任务，自动攻击已暂停。")
             return
         if self.return_map_target is not None:
+            self.stop_patrol()
             return
         if self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending or self.pending_destination is not None:
-            return
-        ticket = str(self.next_attack.get("id", ""))
-        if not ticket or ticket in self.used_attack_tickets or time.monotonic() < self.attack_busy_until:
             return
         candidates = [(self.monster_distance(monster), encounter_id)
                       for encounter_id, monster in self.monsters.items()
@@ -3411,14 +3593,115 @@ class MainWindow(QMainWindow):
                       and time.monotonic() >= self.invalid_target_until.get(encounter_id, 0.0)
                       and (not self.elite_only.isChecked() or
                            str(monster.get("monsterRank", "")).upper() == "ELITE")]
+        if not candidates:
+            if self.chase_target is not None:
+                self.stop_chase()
+            if not self.patrol_timer.isActive() and time.monotonic() >= self.patrol_retry_after:
+                self.start_patrol()
+            return
+
+        # A newly observed target always interrupts the search route.
+        self.stop_patrol(reset_anchor=True)
         nearby = [(distance, encounter_id) for distance, encounter_id in candidates if distance <= 55]
         if nearby:
             self.stop_chase()
             _, encounter_id = min(nearby)
-            self.attack_monster(encounter_id)
+            ticket = str(self.next_attack.get("id", ""))
+            if ticket and ticket not in self.used_attack_tickets and time.monotonic() >= self.attack_busy_until:
+                self.attack_monster(encounter_id)
+            elif time.monotonic() >= self.attack_busy_until:
+                self.combat_status.setText(f"已发现附近怪物 {encounter_id[:8]}，等待服务端攻击票据…")
         elif self.chase_target is None and candidates and time.monotonic() >= self.chase_retry_after:
             distance, encounter_id = min(candidates)
             self.start_chase(encounter_id)
+
+    def start_patrol(self) -> None:
+        """Move through nearby validated terrain while waiting for spawns."""
+        if (self.current_map != 2 or self.world_x is None or self.world_y is None
+                or self.ws is None or not self.world_ready or not self.auto_attack.isChecked()
+                or self.server_dead or self.respawn_pending or self.pending_destination is not None):
+            if self.auto_attack.isChecked() and self.current_map != 2:
+                self.combat_status.setText("当前地图暂无已验证的刷怪巡逻路线，继续等待怪物快照。")
+            return
+        if self.patrol_anchor is None:
+            self.patrol_anchor = (float(self.world_x), float(self.world_y))
+        start = (float(self.world_x), float(self.world_y))
+        directions = ((0, -1), (1, -1), (1, 0), (1, 1),
+                      (0, 1), (-1, 1), (-1, 0), (-1, -1))
+        for _ in range(len(directions)):
+            dx, dy = directions[self.patrol_direction_index]
+            goal = (self.patrol_anchor[0] + dx * self.patrol_ring,
+                    self.patrol_anchor[1] + dy * self.patrol_ring)
+            self.patrol_direction_index += 1
+            if self.patrol_direction_index == len(directions):
+                self.patrol_direction_index = 0
+                if self.patrol_ring >= 960:
+                    self.patrol_ring = 320.0
+                    self.patrol_anchor = start
+                else:
+                    self.patrol_ring += 320.0
+            path = find_map_path(self.current_map, start, goal, max_distance=self.patrol_ring + 400)
+            if path:
+                self.patrol_route = list(path)
+                self.patrol_last_at = time.monotonic()
+                self.patrol_timer.start()
+                self.combat_status.setText("当前暂未发现怪物，正在沿安全路线巡逻搜索；发现目标后会立即追击。")
+                self.append_log(f"当前地图暂无可攻击怪物，开始安全巡逻搜索（地图 {self.current_map}）。")
+                return
+        self.patrol_retry_after = time.monotonic() + 3.0
+        self.combat_status.setText("附近巡逻路线暂不可达，3 秒后重新规划搜索路线。")
+
+    def advance_patrol(self) -> None:
+        if (self.ws is None or not self.world_ready or self.current_map != 2
+                or not self.auto_attack.isChecked()
+                or self.server_dead or self.respawn_pending or self.pending_destination is not None
+                or self.chase_target is not None):
+            self.stop_patrol()
+            return
+        if not self.patrol_route:
+            self.stop_patrol()
+            return
+        while self.patrol_route and math.dist((float(self.world_x), float(self.world_y)), self.patrol_route[0]) <= 12:
+            self.patrol_route.pop(0)
+        if not self.patrol_route:
+            self.stop_patrol()
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - (self.patrol_last_at or now))
+        self.patrol_last_at = now
+        target_x, target_y = self.patrol_route[0]
+        dx, dy = target_x - float(self.world_x), target_y - float(self.world_y)
+        distance = math.hypot(dx, dy)
+        if distance <= 0:
+            return
+        # Keep patrol movement conservative to avoid movement_too_fast rejects.
+        step = min(distance, self.movement_speed * elapsed * 0.4, 7.0)
+        if step <= 0:
+            return
+        next_x = round(float(self.world_x) + dx / distance * step, 2)
+        next_y = round(float(self.world_y) + dy / distance * step, 2)
+        try:
+            self.send_game_packet({"action": "sync", "movementRevision": self.movement_revision,
+                                   "map": self.current_map, "x": next_x, "y": next_y,
+                                   "animation": "run", "attackCritical": False,
+                                   "flip": dx < 0}, log=False)
+        except Exception as exc:
+            self.stop_patrol()
+            self.patrol_retry_after = time.monotonic() + 3.0
+            self.combat_status.setText(f"巡逻移动失败，稍后重试：{type(exc).__name__}: {exc}")
+            return
+        self.world_x, self.world_y = next_x, next_y
+        self.position_estimated = True
+
+    def stop_patrol(self, *, reset_anchor: bool = False) -> None:
+        if hasattr(self, "patrol_timer"):
+            self.patrol_timer.stop()
+        self.patrol_route = []
+        self.patrol_last_at = None
+        if reset_anchor:
+            self.patrol_anchor = None
+            self.patrol_direction_index = 0
+            self.patrol_ring = 320.0
 
     def start_chase(self, encounter_id: str, *, recovery: bool = False) -> None:
         if not recovery:
@@ -3521,7 +3804,7 @@ class MainWindow(QMainWindow):
     def send_stationary_sync(self, *, force: bool = False) -> None:
         if (self.ws is None or not self.world_ready or self.server_dead or self.current_map is None or
                 self.world_x is None or self.world_y is None or self.pending_destination is not None or
-                self.chase_target is not None):
+                self.chase_target is not None or self.patrol_timer.isActive()):
             return
         if not force and self.last_position_sync_at is not None and time.monotonic() - self.last_position_sync_at < 1.0:
             return
@@ -3570,6 +3853,15 @@ class MainWindow(QMainWindow):
     def send_keepalive(self) -> None:
         if self.ws is None or not self.world_ready:
             self.keepalive.stop()
+            return
+        if (self.last_pong_received_at
+                and time.monotonic() - self.last_pong_received_at > 12):
+            self.append_log("12 秒未收到服务端 pong，判定连接失活并触发自动重连。")
+            ws, self.ws = self.ws, None
+            self.keepalive.stop()
+            ws.close()
+            self.bridge.state.emit("心跳超时，正在重连…")
+            self.bridge.connect_failed.emit()
             return
         try:
             sent_at = int(time.monotonic() * 1000)

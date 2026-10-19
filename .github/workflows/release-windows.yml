@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v1.2.4
+        default: v1.2.6
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-desktop-build.txt
-          pyinstaller --noconfirm --clean --onedir --windowed --name TabbyDesktop --add-data "index.html;." --add-data "game_client;game_client" --paths game_client --collect-all keyring --collect-all eth_account --collect-all PySide6.QtWebEngineCore --collect-all PySide6.QtWebEngineWidgets desktop.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name TabbyDesktop --icon "assets/tabby-logo.ico" --add-data "assets;assets" --add-data "index.html;." --add-data "game_client;game_client" --paths game_client --collect-all keyring --collect-all eth_account --collect-all cryptography --collect-all PySide6.QtWebEngineCore --collect-all PySide6.QtWebEngineWidgets desktop.py
           Compress-Archive -Path dist/TabbyDesktop -DestinationPath dist/TabbyDesktop-windows-x64.zip
       - name: Publish release with desktop application
         env:
