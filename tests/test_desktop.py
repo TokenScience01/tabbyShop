@@ -394,6 +394,31 @@ class DesktopTests(unittest.TestCase):
         game.combat_timer.stop()
         game.ws = None
 
+    def test_auto_combat_patrols_all_other_maps_without_monsters(self):
+        game = self.window.game
+        game.ws = object()
+        game.world_ready = True
+        game.auto_attack.blockSignals(True)
+        game.auto_attack.setChecked(True)
+        game.auto_attack.blockSignals(False)
+        game.next_attack = {}
+        map_positions = {1: (416.0, 1504.0), 3: (608.0, 520.0),
+                         4: (9024.0, 1568.0), 5: (192.0, 2528.0),
+                         6: (3872.0, 160.0)}
+
+        for map_id, (x, y) in map_positions.items():
+            with self.subTest(map_id=map_id):
+                game.stop_patrol(reset_anchor=True)
+                game.current_map = map_id
+                game.world_x, game.world_y = x, y
+                game.auto_attack_tick()
+                self.assertTrue(game.patrol_timer.isActive())
+                self.assertTrue(game.patrol_route)
+
+        game.stop_patrol(reset_anchor=True)
+        game.combat_timer.stop()
+        game.ws = None
+
     def test_auto_reconnect_continues_after_many_failures(self):
         game = self.window.game
         game.manual_disconnect = False

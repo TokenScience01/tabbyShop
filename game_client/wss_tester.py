@@ -2353,6 +2353,7 @@ class MainWindow(QMainWindow):
                 if trace:
                     self.append_log("最近移动帧（距 welcome 秒/坐标/修订/seq/life）：" + json.dumps(trace, ensure_ascii=False))
                 self.movement_trace.clear()
+            was_patrolling = self.patrol_timer.isActive()
             retry_movement = (packet.get("code") == "movement_too_fast"
                               and isinstance(position, dict)
                               and (destination is not None or chase_target is not None))
@@ -2393,6 +2394,12 @@ class MainWindow(QMainWindow):
                     self.combat_status.setText(
                         f"追击位置被服务端纠正；已恢复服务端坐标并暂时跳过 {chase_target[:8]}，继续搜索。"
                     )
+            if was_patrolling:
+                # Keep the search anchor/direction cursor so the next pass
+                # tries a different waypoint after the server rejects one.
+                self.stop_patrol()
+                self.patrol_retry_after = time.monotonic() + 1.5
+                self.combat_status.setText("巡逻路线被服务端拒绝；已恢复服务器坐标，稍后换方向继续搜索。")
             self.update_map_buttons()
             if destination is None and chase_target is None and packet.get("code") == "movement_too_fast":
                 self.travel_status.setText("原地位置同步也被服务端拒绝；当前没有移动目标。请查看纠正诊断日志。")
@@ -3616,12 +3623,10 @@ class MainWindow(QMainWindow):
             self.start_chase(encounter_id)
 
     def start_patrol(self) -> None:
-        """Move through nearby validated terrain while waiting for spawns."""
-        if (self.current_map != 2 or self.world_x is None or self.world_y is None
+        """Search the current map while waiting for server-reported spawns."""
+        if (self.current_map not in MAP_NAMES or self.world_x is None or self.world_y is None
                 or self.ws is None or not self.world_ready or not self.auto_attack.isChecked()
                 or self.server_dead or self.respawn_pending or self.pending_destination is not None):
-            if self.auto_attack.isChecked() and self.current_map != 2:
-                self.combat_status.setText("当前地图暂无已验证的刷怪巡逻路线，继续等待怪物快照。")
             return
         if self.patrol_anchor is None:
             self.patrol_anchor = (float(self.world_x), float(self.world_y))
@@ -3632,6 +3637,11 @@ class MainWindow(QMainWindow):
             dx, dy = directions[self.patrol_direction_index]
             goal = (self.patrol_anchor[0] + dx * self.patrol_ring,
                     self.patrol_anchor[1] + dy * self.patrol_ring)
+            # Stone Valley is a compact arena. Keep search waypoints inside
+            # the walkable rectangle recovered from its world scene.
+            if self.current_map == 3:
+                goal = (min(1100.0, max(52.0, goal[0])),
+                        min(620.0, max(32.0, goal[1])))
             self.patrol_direction_index += 1
             if self.patrol_direction_index == len(directions):
                 self.patrol_direction_index = 0
@@ -3640,19 +3650,31 @@ class MainWindow(QMainWindow):
                     self.patrol_anchor = start
                 else:
                     self.patrol_ring += 320.0
-            path = find_map_path(self.current_map, start, goal, max_distance=self.patrol_ring + 400)
+            if self.current_map in (1, 2):
+                path = find_map_path(self.current_map, start, goal, max_distance=self.patrol_ring + 400)
+            else:
+                # Detailed collision grids are only available for maps 1/2.
+                # On other maps, probe a short local waypoint and let the
+                # authoritative server accept or correct it before continuing.
+                path = [goal] if math.dist(start, goal) >= 24 else []
+                for _, portal in ((destination, point) for (source, destination), point in PORTAL_CENTERS.items()
+                                  if source == self.current_map):
+                    if math.dist(goal, portal) < 220:
+                        path = []
+                        break
             if path:
                 self.patrol_route = list(path)
                 self.patrol_last_at = time.monotonic()
                 self.patrol_timer.start()
-                self.combat_status.setText("当前暂未发现怪物，正在沿安全路线巡逻搜索；发现目标后会立即追击。")
-                self.append_log(f"当前地图暂无可攻击怪物，开始安全巡逻搜索（地图 {self.current_map}）。")
+                note = ("已验证路线" if self.current_map in (1, 2) else "小范围搜索路线")
+                self.combat_status.setText(f"当前暂未发现怪物，正在沿{note}搜索；发现目标后会立即追击。")
+                self.append_log(f"当前地图暂无可攻击怪物，开始搜索（地图 {self.current_map}，{note}）。")
                 return
         self.patrol_retry_after = time.monotonic() + 3.0
         self.combat_status.setText("附近巡逻路线暂不可达，3 秒后重新规划搜索路线。")
 
     def advance_patrol(self) -> None:
-        if (self.ws is None or not self.world_ready or self.current_map != 2
+        if (self.ws is None or not self.world_ready or self.current_map not in MAP_NAMES
                 or not self.auto_attack.isChecked()
                 or self.server_dead or self.respawn_pending or self.pending_destination is not None
                 or self.chase_target is not None):
