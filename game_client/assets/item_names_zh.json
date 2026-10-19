@@ -292,5 +292,26 @@
     "slotType": "AMULET",
     "nameEn": "Sovereign Amulet",
     "nameZh": "王者护符"
+  },
+  {
+    "itemCode": "STARTER_AMULET",
+    "equipmentLevel": 1,
+    "slotType": "AMULET",
+    "nameEn": "Starter Amulet",
+    "nameZh": "新手护符"
+  },
+  {
+    "itemCode": "STARTER_ARMOR",
+    "equipmentLevel": 1,
+    "slotType": "ARMOR",
+    "nameEn": "Starter Armor",
+    "nameZh": "新手护甲"
+  },
+  {
+    "itemCode": "STARTER_SHOES",
+    "equipmentLevel": 1,
+    "slotType": "SHOES",
+    "nameEn": "Starter Shoes",
+    "nameZh": "新手鞋"
   }
 ]

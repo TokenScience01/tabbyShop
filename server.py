@@ -564,8 +564,25 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/monitor/stop":
                 self._send_json(200, MONITOR.stop())
                 return
-            if self.path != "/api/shop/order":
+            if self.path not in ("/api/shop/order", "/api/shop/cancel-quote"):
                 self.send_error(404)
+                return
+            if self.path == "/api/shop/cancel-quote":
+                order_id = payload.get("orderId")
+                valid_numeric_id = (isinstance(order_id, int) and not isinstance(order_id, bool)
+                                    and order_id > 0)
+                valid_string_id = (isinstance(order_id, str) and bool(order_id.strip())
+                                   and len(order_id) <= 200
+                                   and not any(ord(char) < 32 for char in order_id))
+                if not (valid_numeric_id or valid_string_id):
+                    raise ValueError("orderId 必须是有效的数字或字符串编号")
+                request = Request(
+                    TARGET + "/cancel-quote",
+                    data=json.dumps({"orderId": order_id}).encode(),
+                    headers=ShopMonitor._headers(self._authorization()),
+                    method="POST",
+                )
+                self._send_upstream(request)
                 return
             product_id = payload.get("productId")
             if isinstance(product_id, bool) or not isinstance(product_id, int) or product_id <= 0:

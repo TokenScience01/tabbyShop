@@ -27,13 +27,32 @@
     <section class="panel catalog" aria-label="商城商品"><div class="panel-head"><div class="panel-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v13H4zM8 7V5a4 4 0 0 1 8 0v2M4 11h16"/></svg>商城商品</div><div class="panel-note" id="catalogUpdated">等待商城数据</div></div><div class="catalog-tools"><label class="catalog-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg><input id="productSearch" type="search" placeholder="搜索名称、编号或卖家" aria-label="搜索商品" /></label><select id="qualityFilter" aria-label="按品质筛选"><option value="">全部品质</option></select><select id="slotFilter" aria-label="按部位筛选"><option value="">全部部位</option></select><select id="sortFilter" aria-label="排序商品"><option value="newest">最新上架</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option></select><span class="catalog-count" id="catalogCount">0 件商品</span></div><div class="table-wrap"><table class="products-table"><thead><tr><th>商品</th><th>品质</th><th>部位</th><th>属性</th><th>卖家</th><th>价格</th></tr></thead><tbody id="productRows"><tr><td colspan="6"><div class="empty">点击「立即刷新」获取商品列表</div></td></tr></tbody></table></div><div class="pagination"><span id="pageInfo">等待数据</span><div class="page-buttons"><button id="prevPage" type="button" disabled>上一页</button><button id="nextPage" type="button" disabled>下一页</button></div></div></section>
     <footer class="footnote"><span>API ENDPOINT · GAME.TABBY.MEME</span><span>服务端按配置持续扫描；关闭页面不影响监控</span></footer>
   </main><div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="productDialog" aria-labelledby="productDialogTitle">
+    <div class="detail-head"><div><div class="eyebrow">PRODUCT INSPECTOR</div><h2 id="productDialogTitle">商品详情</h2></div><button class="button" id="closeProductDialog" type="button">关闭</button></div>
+    <p class="detail-hint">双击商品打开原始商品 JSON。链上参数需要先向商城申请一次订单报价；此操作只取报价，不会签名或发送交易。</p>
+    <pre class="detail-json" id="productJson"></pre>
+    <section class="transfer-box"><div class="transfer-title">BSC · ERC-20 transfer(address,uint256)</div><div class="transfer-meta" id="transferStatus">生成报价后显示合约地址和两个参数。</div>
+      <div class="transfer-field"><span>代币合约地址（交易 To）</span><code id="transferContract">—</code><button type="button" data-copy="transferContract">复制</button></div>
+      <div class="transfer-field"><span>参数 1 · 收款地址 recipient</span><code id="transferRecipient">—</code><button type="button" data-copy="transferRecipient">复制</button></div>
+      <div class="transfer-field"><span>参数 2 · 数量 amountRaw（uint256）</span><code id="transferAmount">—</code><button type="button" data-copy="transferAmount">复制</button></div>
+      <div class="transfer-meta" id="transferReadable"></div>
+      <button class="button primary" id="getTransferParams" type="button">获取调用参数（创建报价）</button>
+    </section>
+  </dialog>
+  <style>
+    #productDialog{width:min(860px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:22px;background:#171a16;color:#f1f3ed;border:1px solid #41483c;border-radius:14px;box-shadow:0 24px 80px #000a}
+    #productDialog::backdrop{background:#050705bb;backdrop-filter:blur(3px)}
+    .detail-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.detail-head .eyebrow{margin:0 0 6px}.detail-head h2{margin:0;font-size:22px}.detail-hint,.transfer-meta{color:#a3ad9b;font-size:12px;line-height:1.6}.detail-json{max-height:34vh;overflow:auto;margin:14px 0;padding:14px;background:#10120f;border:1px solid #30362d;border-radius:8px;color:#d7dfd1;font:11px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+    .transfer-box{padding:15px;background:#141713;border:1px solid #39422f;border-radius:9px}.transfer-title{font-weight:700;color:var(--accent);margin-bottom:6px}.transfer-field{display:grid;grid-template-columns:minmax(190px, .8fr) minmax(0,2fr) auto;align-items:center;gap:10px;margin-top:8px;padding:8px 10px;background:#10120f;border:1px solid #30362d;border-radius:7px}.transfer-field span{color:#aab2a3;font-size:11px}.transfer-field code{color:#e8eee0;font:11px var(--mono);overflow-wrap:anywhere}.transfer-field button{border:1px solid #46513a;background:#20271a;color:var(--accent);border-radius:6px;padding:6px 9px;font-size:10px}.transfer-box>.button{margin-top:12px}.products-table tbody tr[data-product-index]{cursor:zoom-in}.products-table tbody tr[data-product-index]:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+    @media(max-width:600px){#productDialog{padding:16px}.transfer-field{grid-template-columns:1fr auto}.transfer-field span{grid-column:1/-1}}
+  </style>
   <script>
     (() => {
       const $ = id => document.getElementById(id);
       const token = $('token'), intervalInput = $('interval'), concurrencyInput = $('concurrency');
       let serverMonitorEnabled = false, stateTimer = null, busy = false, scans = 0, events = [], remember = true;
       let walletAddress = '', autoBuyActive = false;
-      let productList = [], productPage = 0, lastProductRevision = -1, hydrating = true;
+      let productList = [], visibleProducts = [], selectedProduct = null, productPage = 0, lastProductRevision = -1, hydrating = true;
       const pageSize = 30, slotNames = {WEAPON:'武器',ARMOR:'护甲',SHOES:'鞋子',RING:'戒指',AMULET:'护符',HAT:'头盔',OTHER:'其他'};
 
       const desktopMode = window.__TABBY_DESKTOP__ === true;
@@ -169,11 +188,124 @@
         $('pageInfo').textContent = total ? `${start+1}–${Math.min(start+pageSize,total)} / ${total}` : '没有符合条件的商品';
         $('prevPage').disabled = productPage === 0; $('nextPage').disabled = !pages || productPage >= pages-1;
         if (!shown.length) { $('productRows').innerHTML = '<tr><td colspan="6"><div class="empty">没有符合条件的商品</div></td></tr>'; return; }
-        $('productRows').innerHTML = shown.map(p => {
+        visibleProducts = shown;
+        $('productRows').innerHTML = shown.map((p, rowIndex) => {
           const q = String(p.qualityCode||'').toLowerCase();
           const attrs = (p.attributes||[]).map(a => `${esc(a.displayName||a.code)} +${esc(a.value)}${a.percentage?'%':''}`).join(' · ') || '—';
-          return `<tr><td><div class="product-name ${esc(q)}">${esc(p.itemName||p.itemCode||'未知商品')}</div><div class="product-meta">${esc(p.itemCode||'')} · #${esc(p.id)}</div></td><td><span class="quality ${esc(q)}"><span class="quality-dot"></span>${esc(p.qualityCode||'未知')}</span></td><td><span class="slot-tag">${esc(slotNames[p.slotType]||p.slotType||'—')}</span></td><td><div class="attributes">${attrs}</div></td><td><span class="seller">#${esc(p.sellerId??'—')}</span></td><td><span class="price">${esc(p.price??'—')}</span></td></tr>`;
+          return `<tr data-product-index="${rowIndex}" tabindex="0" title="双击查看商品 JSON 和链上参数"><td><div class="product-name ${esc(q)}">${esc(p.itemName||p.itemCode||'未知商品')}</div><div class="product-meta">${esc(p.itemCode||'')} · #${esc(p.id)}</div></td><td><span class="quality ${esc(q)}"><span class="quality-dot"></span>${esc(p.qualityCode||'未知')}</span></td><td><span class="slot-tag">${esc(slotNames[p.slotType]||p.slotType||'—')}</span></td><td><div class="attributes">${attrs}</div></td><td><span class="seller">#${esc(p.sellerId??'—')}</span></td><td><span class="price">${esc(p.price??'—')}</span></td></tr>`;
         }).join('');
+      }
+      let activeQuote = null;
+      let quoteReleasePromise = Promise.resolve();
+      let quoteFlow = Promise.resolve();
+      let productSelectionGeneration = 0;
+      function quoteOrderId(order) {
+        const id = order?.orderId ?? order?.id;
+        if (typeof id === 'number') return Number.isSafeInteger(id) && id > 0 ? id : null;
+        if (typeof id === 'string' && id.trim() && id.length <= 200 && !/[\u0000-\u001f]/.test(id)) return id;
+        return null;
+      }
+      async function releaseQuote(orderId) {
+        const response = await fetch('/api/shop/cancel-quote', {method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({orderId})});
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error||payload.message||`释放报价失败（HTTP ${response.status}）`);
+      }
+      async function cancelActiveQuote() {
+        const quote = activeQuote;
+        if (!quote) return;
+        activeQuote = null;
+        try {
+          await releaseQuote(quote.orderId);
+        } catch (error) {
+          activeQuote = quote;
+          throw error;
+        }
+      }
+      function openProductDetails(product) {
+        productSelectionGeneration++;
+        if (activeQuote && Number(activeQuote.productId) !== Number(product.id)) {
+          quoteReleasePromise = cancelActiveQuote();
+        }
+        selectedProduct = product;
+        $('productDialogTitle').textContent = `${product.itemName||product.itemCode||'商品'} · #${product.id??'—'}`;
+        $('productJson').textContent = JSON.stringify(product, null, 2);
+        $('transferStatus').textContent = '生成报价后显示合约地址和两个参数。获取报价不会签名或广播交易。';
+        $('transferContract').textContent = '—'; $('transferRecipient').textContent = '—';
+        $('transferAmount').textContent = '—'; $('transferReadable').textContent = '';
+        $('getTransferParams').disabled = false;
+        $('productDialog').showModal();
+      }
+      async function getTransferParams() {
+        if (!selectedProduct || !Number.isInteger(Number(selectedProduct.id))) return;
+        if (!token.value.trim()) { $('transferStatus').textContent = '请先在商城设置中填写游戏会话 Token。'; return; }
+        const button = $('getTransferParams'); button.disabled = true;
+        const generation = productSelectionGeneration;
+        const productId = Number(selectedProduct.id);
+        const previousQuoteFlow = quoteFlow;
+        let unlockQuoteFlow;
+        quoteFlow = new Promise(resolve => { unlockQuoteFlow = resolve; });
+        $('transferStatus').textContent = '正在向商城申请订单报价…';
+        try {
+          await previousQuoteFlow;
+          await quoteReleasePromise;
+          let order = activeQuote && Number(activeQuote.productId) === productId ? activeQuote.order : null;
+          if (activeQuote && Number(activeQuote.productId) !== productId) {
+            await cancelActiveQuote();
+          }
+          if (activeQuote && Number(activeQuote.productId) === productId && Date.parse(activeQuote.order.expiresAt) <= Date.now() + 5000) {
+            await cancelActiveQuote();
+            order = null;
+          }
+          if (!order) {
+            const response = await fetch('/api/shop/order', {method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({productId})});
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error||payload.message||`报价请求失败（HTTP ${response.status}）`);
+            order = payload.order && typeof payload.order === 'object' ? payload.order : payload;
+            // Record the server reservation before validating its fields, so
+            // malformed/expired responses are still released when the dialog closes.
+            const orderId = quoteOrderId(order);
+            if (orderId !== null) activeQuote = {productId, orderId, order};
+            if (generation !== productSelectionGeneration || Number(selectedProduct?.id) !== productId) {
+              if (orderId !== null) await releaseQuote(orderId);
+              activeQuote = null;
+              return;
+            }
+            if (orderId === null) throw new Error('报价响应缺少有效订单编号，无法在切换商品时释放');
+          }
+          const validAddress = value => /^0x[\da-fA-F]{40}$/.test(String(value||''));
+          const tokenAddress = order.token, recipient = order.recipient, amountRaw = String(order.amountRaw??'');
+          if (order.status !== 'QUOTED') throw new Error(`订单报价状态无效：${order.status??'缺失'}`);
+          if (Number(order.chainId) !== 56) throw new Error(`报价网络不是 BSC（chainId=${order.chainId??'缺失'}）`);
+          if (!validAddress(tokenAddress) || !validAddress(recipient)) throw new Error('报价缺少有效的代币合约地址或收款地址');
+          if (!/^\d+$/.test(amountRaw) || BigInt(amountRaw) <= 0n || BigInt(amountRaw) >= (1n<<256n)) throw new Error('报价里的 amountRaw 无效');
+          if (Number(order.productId) !== Number(selectedProduct.id)) throw new Error('报价商品 ID 与当前商品不一致');
+          if (!order.expiresAt || Date.parse(order.expiresAt) <= Date.now()) throw new Error('报价已过期或缺少有效期限，请重新获取');
+          if (!activeQuote || Number(activeQuote.productId) !== productId || activeQuote.orderId == null) throw new Error('报价缺少有效订单编号，无法在切换商品时释放');
+          $('transferContract').textContent = tokenAddress;
+          $('transferRecipient').textContent = recipient;
+          $('transferAmount').textContent = amountRaw;
+          const expiry = order.expiresAt ? ` · 报价有效期至 ${order.expiresAt}` : '';
+          $('transferReadable').textContent = `金额 ${order.amount??'—'}${order.symbol?` ${order.symbol}`:''} · BSC 主网 (56)${expiry}`;
+          $('transferStatus').textContent = '参数来自商城订单报价。区块浏览器调用 transfer 时，To 填代币合约地址，参数按下方顺序填写。';
+        } catch (error) {
+          $('transferStatus').textContent = `获取报价失败：${error.message}`;
+        } finally { if (generation === productSelectionGeneration) button.disabled = false; unlockQuoteFlow(); }
+      }
+      async function copyTransferField(id) {
+        const value = $(id).textContent;
+        if (!value || value === '—') return;
+        try {
+          if (window.__TABBY_DESKTOP__ && window.__tabbyClipboard) {
+            window.__tabbyClipboard.copyText(value);
+          } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+          } else {
+            const input = document.createElement('textarea'); input.value = value; input.style.position='fixed'; input.style.opacity='0'; document.body.appendChild(input); input.select();
+            const copied = document.execCommand('copy'); input.remove();
+            if (!copied) throw new Error('浏览器拒绝访问剪贴板');
+          }
+          toast('已复制');
+        } catch (error) { toast(`复制失败：${error.message||'请检查剪贴板权限'}`); }
       }
       function formatJSON(data) { return JSON.stringify(data,null,2).replace(/("(?:\\.|[^"\\])*"\s*:)/g,'<span class="key">$1</span>'); }
       function record(ok,status,duration,label,data,error) {
@@ -306,6 +438,17 @@
       $('productSearch').addEventListener('input',() => { productPage=0; drawProducts(); });
       $('prevPage').addEventListener('click',() => { if (productPage>0) { productPage--; drawProducts(); } });
       $('nextPage').addEventListener('click',() => { productPage++; drawProducts(); });
+      $('productRows').addEventListener('dblclick',event => {
+        const row=event.target.closest('tr[data-product-index]');
+        if(row) { const product=visibleProducts[Number(row.dataset.productIndex)]; if(product) openProductDetails(product); }
+      });
+      $('productRows').addEventListener('keydown',event => {
+        if(event.key==='Enter') { const row=event.target.closest('tr[data-product-index]'); if(row) { const product=visibleProducts[Number(row.dataset.productIndex)]; if(product) openProductDetails(product); } }
+      });
+      $('getTransferParams').addEventListener('click',getTransferParams);
+      $('closeProductDialog').addEventListener('click',()=>$('productDialog').close());
+      $('productDialog').addEventListener('close',() => { productSelectionGeneration++; quoteReleasePromise = cancelActiveQuote().catch(error => { $('transferStatus').textContent = `释放报价失败：${error.message}`; }); });
+      $('productDialog').addEventListener('click',event => { const target=event.target.closest('[data-copy]'); if(target) copyTransferField(target.dataset.copy); });
 
       setInterval(() => {$('clock').textContent=time();},1000);
       $('clock').textContent=time();

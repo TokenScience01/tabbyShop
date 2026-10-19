@@ -3,17 +3,23 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ.setdefault('QTWEBENGINE_CHROMIUM_FLAGS', '--disable-gpu')
 import json
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from http.server import ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
-from PySide6.QtWidgets import (QApplication, QLabel, QMessageBox, QPushButton,
-                               QTableWidget, QTabWidget)
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel, QMessageBox,
+                               QPushButton, QTableWidget, QTabWidget)
+from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer
+from PySide6.QtGui import QImage
 from desktop import DesktopWindow, shop
-from game_client.wss_tester import QUALITY_NAMES_ZH, localized_item_name, quality_color
+from credential_vault import CredentialVault
+from game_client.wss_tester import (ITEM_NAMES_ZH, QUALITY_NAMES_ZH,
+                                    equipment_attribute_lines, localized_item_name, quality_color)
+from game_client.minimap import peer_map_position
 
 
 class DesktopTests(unittest.TestCase):
@@ -69,9 +75,31 @@ class DesktopTests(unittest.TestCase):
         self.window.on_signed_login({'ok': False, 'error': 'test'})
         self.assertEqual(shop.read_token(), 'Bearer signed-game-session')
 
+    def test_saved_wallet_selector_lists_addresses_without_unlocking_private_keys(self):
+        game = self.window.game
+        with tempfile.TemporaryDirectory() as temporary:
+            game.credential_vault = CredentialVault(Path(temporary) / 'vault')
+            first = '0x' + '1' * 40
+            second = '0x' + '2' * 40
+            game.credential_vault.store_wallet('private-one', 'test-password', first)
+            game.credential_vault.store_wallet('private-two', 'test-password', second)
+            game.refresh_saved_wallets()
+            addresses = {game.saved_wallet.itemData(index) for index in range(game.saved_wallet.count())}
+            self.assertEqual(addresses, {'', first, second})
+            self.assertNotIn('private-one', [game.saved_wallet.itemText(index)
+                                             for index in range(game.saved_wallet.count())])
+            game.saved_wallet.setCurrentIndex(game.saved_wallet.findData(second))
+            self.assertEqual(game.saved_wallet.currentData(), second)
+            self.assertEqual(game.settings.value('lastWalletAddress'), second)
+            game.private_key.setText('temporary-key-entry')
+            game.on_private_key_edited()
+            self.assertEqual(game.saved_wallet.currentData(), '')
+
     def test_private_key_auth_is_default_and_token_field_rejects_wallet_key_format(self):
         game = self.window.game
         self.assertEqual(game.auth_method.currentData(), 'private_key')
+        self.assertIs(game.saved_wallet.parentWidget(), self.window.account_dialog)
+        self.assertFalse(self.window.account_wallet_label.isHidden())
         with patch.object(QMessageBox, 'warning') as warning, \
              patch.object(QMessageBox, 'information') as information:
             self.window.account_token.setText('0x' + 'a' * 64)
@@ -116,6 +144,49 @@ class DesktopTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_cancel_quote_is_proxied_to_the_matching_upstream_endpoint(self):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), self.window.make_handler())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        class UpstreamResponse:
+            status = 200
+            headers = {'Content-Type': 'application/json'}
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return b'{"ok":true}'
+        try:
+            request = Request(
+                f'http://127.0.0.1:{server.server_port}/api/shop/cancel-quote',
+                data=b'{"orderId":42}', method='POST',
+                headers={'Content-Type': 'application/json', 'Authorization': 'Bearer session'},
+            )
+            with patch.object(shop, 'urlopen', return_value=UpstreamResponse()) as upstream:
+                with urlopen(request) as response:
+                    self.assertEqual(json.load(response), {'ok': True})
+            forwarded = upstream.call_args.args[0]
+            self.assertEqual(forwarded.full_url, shop.TARGET + '/cancel-quote')
+            self.assertEqual(json.loads(forwarded.data), {'orderId': 42})
+            self.assertEqual(forwarded.get_header('Authorization'), 'Bearer session')
+            string_order = Request(
+                f'http://127.0.0.1:{server.server_port}/api/shop/cancel-quote',
+                data=json.dumps({'orderId': 'quote-7f38b9'}).encode(), method='POST',
+                headers={'Content-Type': 'application/json', 'Authorization': 'Bearer session'},
+            )
+            with patch.object(shop, 'urlopen', return_value=UpstreamResponse()) as upstream:
+                with urlopen(string_order) as response:
+                    self.assertEqual(json.load(response), {'ok': True})
+            self.assertEqual(json.loads(upstream.call_args.args[0].data), {'orderId': 'quote-7f38b9'})
+            invalid = Request(
+                f'http://127.0.0.1:{server.server_port}/api/shop/cancel-quote',
+                data=b'{"orderId":true}', method='POST',
+                headers={'Content-Type': 'application/json'},
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(invalid)
+            self.assertEqual(error.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_embedded_shop_receives_shared_token(self):
         self.window.account_token.setText('test-embedded-session')
         self.window.tabs.setCurrentIndex(1)
@@ -137,6 +208,19 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(state['token'], 'test-embedded-session')
         self.assertTrue(state['readonly'])
         self.assertTrue(state['desktop'])
+        result.clear()
+        self.window.web.page().runJavaScript(
+            "typeof window.__tabbyClipboard?.copyText === 'function'",
+            lambda value: (result.append(value), loop.quit()))
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        self.assertEqual(result, [True])
+        self.window.web.page().runJavaScript(
+            "window.__tabbyClipboard.copyText('clipboard-integration-test'); true")
+        loop = QEventLoop()
+        QTimer.singleShot(150, loop.quit)
+        loop.exec()
+        self.assertEqual(self.app.clipboard().text(), 'clipboard-integration-test')
         self.window.account_token.setText('changed-session')
         self.assertEqual(shop.read_token(), 'Bearer changed-session')
 
@@ -189,14 +273,16 @@ class DesktopTests(unittest.TestCase):
             {'playerItemId': 31, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON',
              'qualityCode': 'L3', 'equipmentLevel': 1, 'equipped': False},
         ]}
-        game.backpack_table = QTableWidget(0, 4)
+        game.backpack_table = QTableWidget(0, 5)
         game.backpack_status = QLabel()
+        game.backpack_equip_button = QPushButton()
+        game.backpack_compare_button = QPushButton()
         game.update_backpack()
         self.assertEqual(game.backpack_table.item(0, 0).foreground().color().name(), '#c994ff')
         self.assertEqual(game.backpack_table.item(0, 2).text(), '史诗')
         game.update_social_inventory()
         self.assertEqual(game.social_inventory_table.item(0, 0).foreground().color().name(), '#c994ff')
-        self.assertEqual(game.social_inventory_table.item(0, 4).text(), '背包')
+        self.assertEqual(game.social_inventory_table.item(0, 5).text(), '背包')
 
         game.api_equipment = {'items': [
             {'itemCode': 'STARTER_SHOES', 'slotType': 'SHOES',
@@ -255,15 +341,150 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(game.monster_empty_state.isVisible())
         self.assertTrue(game.monster_table.isVisible())
 
+    def test_monster_level_column_and_selected_inventory_preview(self):
+        game = self.window.game
+        game.current_map = 2
+        game.world_x, game.world_y = 0, 0
+        game.monsters = {'e1': {'mapId': 2, 'health': 10, 'maxHealth': 10,
+                                'x': 3, 'y': 4, 'level': 18, 'name': 'skeleton'}}
+        game.refresh_monster_table()
+        self.assertEqual(game.monster_table.horizontalHeaderItem(2).text(), '等级')
+        self.assertEqual(game.monster_table.item(0, 2).text(), '18')
+        game.api_equipment = {'items': [
+            {'playerItemId': 31, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON',
+             'qualityCode': 'L2', 'equipmentLevel': 3, 'equipped': False},
+        ]}
+        game.update_social_inventory()
+        game.social_inventory_table.selectRow(0)
+        self.assertEqual(game.selected_item_name.text(), '铁短剑')
+        self.assertIn('武器  ·  稀有  ·  等级 3', game.selected_item_detail.text())
+        self.assertIn('铁短剑', game.equip_item_button.text())
+
+    def test_auto_potion_is_opt_in_and_requires_health_inventory_and_ready_cooldown(self):
+        game = self.window.game
+        game.ws = object()
+        game.world_ready = True
+        game.last_self_state = {'health': 20, 'maxHealth': 100,
+                                'healthPotions': 2, 'potionCooldownMs': 0}
+        sent = []
+        game.send_game_packet = lambda packet, **kwargs: sent.append(packet)
+        game.auto_potion.setChecked(False)
+        game.try_auto_use_potion()
+        self.assertEqual(sent, [])
+        game.auto_potion.setChecked(True)
+        game.last_self_state['potionCooldownMs'] = 1000
+        game.try_auto_use_potion()
+        self.assertEqual(sent, [])
+        game.last_self_state['potionCooldownMs'] = 0
+        game.try_auto_use_potion()
+        self.assertEqual(sent, [{'action': 'useHealthPotion'}])
+        self.assertTrue(game.auto_potion_pending)
+        game.auto_potion.setChecked(False)
+        self.assertFalse(game.auto_potion_pending)
+        game.ws = None
+
+    def test_source_item_name_table_covers_all_bundled_equipment_codes(self):
+        self.assertEqual(len(ITEM_NAMES_ZH), 90)  # 45 item codes and their English-name aliases
+        self.assertEqual(localized_item_name({'itemCode': 'armor-p6'}), '王者战甲')
+        self.assertEqual(localized_item_name({'itemCode': 'HEALTH_POTION'}), '生命药水')
+        self.assertEqual(localized_item_name({'itemCode': 'STARTER_AMULET'}), '新手护符')
+        self.assertEqual(localized_item_name({'nameEn': 'STARTER_ARMOR'}), '新手护甲')
+        self.assertEqual(localized_item_name({'nameEn': 'Unmapped Blade', 'slotType': 'WEAPON'}), '未收录武器')
+
+    def test_compact_dashboard_exposes_potion_toggle_and_combat_feed(self):
+        game = self.window.game
+        self.assertTrue(game.auto_potion.isVisible())
+        self.assertTrue(game.combat_status.isVisible())
+        self.assertTrue(all(card.isVisible() for card in game.combat_stat_cards.values()))
+
+    def test_auto_attack_defaults_off_and_dashboard_panels_use_available_space(self):
+        game = self.window.game
+        self.assertFalse(game.auto_attack.isChecked())
+        self.assertFalse(game.auto_potion.isChecked())
+        self.assertEqual(game.quest_table.maximumHeight(), 16777215)
+        self.assertEqual(game.character_card.sizePolicy().verticalPolicy().name, 'Preferred')
+
+    def test_monster_level_range_is_opt_in_and_filters_combat_targets(self):
+        game = self.window.game
+        game.monster_level_limited.setChecked(False)
+        game.monster_level_min.setValue(10)
+        game.monster_level_max.setValue(20)
+        self.assertTrue(game.monster_matches_level_range({'level': 3}))
+
+        game.monster_level_limited.setChecked(True)
+        self.assertTrue(game.monster_matches_level_range({'level': 10}))
+        self.assertTrue(game.monster_matches_level_range({'monsterLevel': 20}))
+        self.assertFalse(game.monster_matches_level_range({'level': 9}))
+        self.assertFalse(game.monster_matches_level_range({'requiredLevel': 21}))
+        self.assertFalse(game.monster_matches_level_range({'name': 'unknown level'}))
+
+        game.monsters['outside-range'] = {'level': 9, 'mapId': 2, 'health': 10}
+        with patch.object(game, 'send_game_packet') as send:
+            self.assertFalse(game.attack_monster('outside-range'))
+        send.assert_not_called()
+        game.monsters.pop('outside-range', None)
+        game.monster_level_limited.setChecked(False)
+
+    def test_map_summary_hides_protocol_counters_and_throttles_predicted_position(self):
+        game = self.window.game
+        game.world_ready = True
+        game.current_map = 2
+        game.world_x, game.world_y = 100, 200
+        game.position_estimated = False
+        game.update_map_buttons()
+        self.assertEqual(game.world_status.text(), '坐标：(100, 200)')
+        self.assertNotIn('生命序号', game.world_status.text())
+        game.position_estimated = True
+        game.last_world_status_render_at = __import__('time').monotonic()
+        game.world_status.setText('坐标：(100, 200)')
+        game.world_x = 101
+        game.update_map_buttons()
+        self.assertEqual(game.world_status.text(), '坐标：(100, 200)')
+
+    def test_auto_route_retry_is_bounded_instead_of_looping_forever(self):
+        game = self.window.game
+        game.quest_map_target = 2
+        with patch('game_client.wss_tester.QTimer.singleShot') as schedule:
+            game.schedule_auto_travel_retry()
+            game.schedule_auto_travel_retry()
+            game.schedule_auto_travel_retry()
+        self.assertEqual(game.auto_route_retry_count, 2)
+        self.assertEqual(schedule.call_count, 2)
+        self.assertIn('已达上限', game.travel_status.text())
+
+    def test_patrol_search_expands_beyond_previous_960_unit_limit(self):
+        game = self.window.game
+        class FakeSocket:
+            def close(self):
+                pass
+
+        game.ws = FakeSocket()
+        game.world_ready = True
+        game.current_map = 2
+        game.world_x, game.world_y = 3872, 7488
+        game.auto_attack.blockSignals(True)
+        game.auto_attack.setChecked(True)
+        game.auto_attack.blockSignals(False)
+        game.patrol_ring = 2880
+        with patch('wss_tester.find_map_path', return_value=[(3872, 4608)]) as find_path:
+            game.start_patrol()
+        self.assertGreaterEqual(find_path.call_args.kwargs['max_distance'], 3200)
+        game.stop_patrol(reset_anchor=True)
+        game.auto_attack.setChecked(False)
+        game.ws = None
+
     def test_equipment_actions_use_documented_game_endpoints(self):
         game = self.window.game
         game.api_equipment = {'items': [
             {'playerItemId': 31, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON',
-             'qualityCode': 'L2', 'equipped': False},
+             'qualityCode': 'L2', 'attack': 5, 'equipped': False},
             {'playerItemId': 32, 'itemCode': 'ARMORP1', 'slotType': 'ARMOR',
              'qualityCode': 'L1', 'equipped': True},
         ]}
         game.update_social_inventory()
+        game.social_inventory_table.selectRow(0)
+        self.assertIn('攻击 +5', game.social_inventory_table.item(0, 4).text())
+        self.assertIn('攻击 +5', game.selected_item_attributes.text())
         game.social_inventory_table.selectRow(0)
         calls = []
         game.request_social_api = lambda *args: calls.append(args)
@@ -272,7 +493,83 @@ class DesktopTests(unittest.TestCase):
         game.social_inventory_table.selectRow(1)
         game.equip_selected_item()
         self.assertEqual(calls[-1], ('unequip', '/equipment/unequip', 'POST', {'slotType': 'ARMOR'}))
-        self.assertFalse(game.sell_item_button.isEnabled())
+        self.assertTrue(game.sell_item_button.isEnabled())
+        with patch.object(QMessageBox, 'information') as info:
+            game.sell_item_button.click()
+        info.assert_called_once()
+        self.assertIn('暂不可上架', game.inventory_action_status.text())
+
+    def test_backpack_shows_attributes_and_allows_same_slot_comparison_selection(self):
+        game = self.window.game
+        game.api_equipment = {'items': [
+            {'playerItemId': 41, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON', 'qualityCode': 'L1',
+             'equipmentLevel': 1, 'attack': 4, 'equipped': False},
+            {'playerItemId': 42, 'itemCode': 'SWORDP2', 'slotType': 'WEAPON', 'qualityCode': 'L2',
+             'equipmentLevel': 2, 'attack': 9, 'attributes': [{'code': 'HEALTH', 'value': 12}], 'equipped': False},
+            {'playerItemId': 43, 'itemCode': 'ARMORP1', 'slotType': 'ARMOR', 'qualityCode': 'L1',
+             'defense': 3, 'equipped': False},
+        ]}
+        game.backpack_table = QTableWidget(0, 5)
+        game.backpack_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        game.backpack_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        game.backpack_status = QLabel()
+        game.backpack_equip_button = QPushButton()
+        game.backpack_compare_button = QPushButton()
+        game.backpack_sell_button = QPushButton()
+        game.update_backpack()
+        self.assertIn('攻击 +4', game.backpack_table.item(0, 4).text())
+        self.assertIn('生命 +12', game.backpack_table.item(1, 4).text())
+        selection = game.backpack_table.selectionModel()
+        selection.select(game.backpack_table.model().index(0, 0),
+                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+        selection.select(game.backpack_table.model().index(1, 0),
+                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+        game.update_backpack_action()
+        self.assertTrue(game.backpack_compare_button.isEnabled())
+        compared = []
+        game.open_equipment_comparison = lambda items: compared.extend(items)
+        game.compare_backpack_selection()
+        self.assertEqual([item['playerItemId'] for item in compared], [41, 42])
+        compare_dialog = QDialog()
+        calls = []
+        game.request_social_api = lambda *args: calls.append(args)
+        game.equip_item_from_comparison(game.api_equipment['items'][1], compare_dialog)
+        self.assertEqual(calls[-1], ('equip', '/equipment/equip', 'POST', {'playerItemId': 42}))
+
+    def test_single_backpack_item_compares_against_equipped_item_and_highlights_differences(self):
+        game = self.window.game
+        equipped = {'playerItemId': 30, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON',
+                    'qualityCode': 'L1', 'attack': 4, 'equipped': True}
+        carried = {'playerItemId': 31, 'itemCode': 'SWORDP2', 'slotType': 'WEAPON',
+                   'qualityCode': 'L2', 'attack': 9, 'equipped': False}
+        game.api_equipment = {'items': [equipped, carried]}
+        game.backpack_table = QTableWidget(0, 5)
+        game.backpack_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        game.backpack_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        game.backpack_status = QLabel()
+        game.backpack_equip_button = QPushButton()
+        game.backpack_compare_button = QPushButton()
+        game.backpack_sell_button = QPushButton()
+        game.update_backpack()
+        game.backpack_table.selectRow(0)
+        game.update_backpack_action()
+        self.assertTrue(game.backpack_compare_button.isEnabled())
+        self.assertEqual(game.backpack_compare_button.text(), '对比已装备')
+        captured = []
+        with patch.object(QDialog, 'exec', lambda dialog: captured.append(dialog) or 0):
+            game.compare_backpack_selection()
+        table = captured[0].findChild(QTableWidget)
+        self.assertIn('已装备', table.horizontalHeaderItem(1).text())
+        self.assertIn('铁卫剑', table.horizontalHeaderItem(2).text())
+        self.assertNotEqual(table.item(2, 1).background().color().name(),
+                            table.item(2, 2).background().color().name())
+        buttons = captured[0].findChildren(QPushButton)
+        self.assertIn('当前已装备', [button.text() for button in buttons])
+
+    def test_item_attribute_formatting_covers_game_stats(self):
+        self.assertEqual(equipment_attribute_lines({'attributes': [
+            {'code': 'ATTACK', 'value': 8}, {'code': 'LUCK', 'value': 3}
+        ]}), ['攻击 +8', '幸运 +3%'])
 
     def test_mode_and_chat_use_live_realtime_actions(self):
         game = self.window.game
@@ -505,6 +802,44 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(game.monster_table.rowCount(), 1)
         self.assertGreater(game.invalid_target_until[encounter_id], __import__('time').monotonic())
         self.assertNotIn('ticket-1', game.used_attack_tickets)
+
+    def test_minimap_accepts_flat_and_nested_peer_positions(self):
+        self.assertEqual(peer_map_position({'mapId': '2', 'x': '12.5', 'y': 8}), (2, 12.5, 8.0))
+        self.assertEqual(peer_map_position({'map': 3, 'position': {'x': 10, 'y': -4}}), (3, 10.0, -4.0))
+        self.assertEqual(peer_map_position({'id': 8, 'x': 10, 'y': 12}, 4), (4, 10.0, 12.0))
+        self.assertIsNone(peer_map_position({'playerName': 'no coordinates'}))
+
+    def test_minimap_keeps_grid_background_visible_inside_terrain(self):
+        game = self.window.game
+        game.current_map = 2
+        game.world_x, game.world_y = 3840, 3840
+        game.monsters = {}
+        game.last_peers = []
+        game.minimap.resize(320, 320)
+        image = QImage(320, 320, QImage.Format.Format_ARGB32)
+        image.fill(0)
+        game.minimap.render(image)
+        self.assertEqual(image.pixelColor(20, 20).name(), '#191d1e')
+
+    def test_nearby_players_survive_empty_and_partial_snapshots_until_stale(self):
+        game = self.window.game
+        game.current_map = 2
+        game.merge_nearby_players([{'id': 7, 'playerName': '附近玩家', 'x': 10, 'y': 20}])
+        game.merge_nearby_players([])
+        self.assertEqual(len(game.last_peers), 1)
+        game.merge_nearby_players([{'id': 7, 'x': 12}])
+        self.assertEqual(game.last_peers[0]['playerName'], '附近玩家')
+        self.assertEqual(game.last_peers[0]['x'], 12)
+        game.peer_last_seen['id:7'] = 100.0
+        game.expire_nearby_players(109.0)
+        self.assertEqual(game.last_peers, [])
+
+    def test_combat_feedback_uses_tone_color_and_restores_default(self):
+        game = self.window.game
+        game.set_combat_feedback('命中：伤害 42 · 暴击', 'critical')
+        self.assertIn('#E7B85E', game.combat_status.styleSheet())
+        game.set_combat_feedback('攻击被拒绝：invalid_target', 'error')
+        self.assertIn('#E47782', game.combat_status.styleSheet())
 
 
 if __name__ == '__main__':

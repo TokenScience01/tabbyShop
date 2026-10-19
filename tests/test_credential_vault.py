@@ -37,6 +37,25 @@ class CredentialVaultTests(unittest.TestCase):
             self.assertFalse(vault.exists())
             self.assertTrue(all(not path.exists() for path in vault.shard_paths))
 
+    def test_multiple_wallets_are_saved_as_independent_encrypted_shard_sets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            vault = CredentialVault(Path(temporary) / 'vault')
+            first = '0x' + '1' * 40
+            second = '0x' + '2' * 40
+            password = 'shared-test-master-password'
+            vault.store_wallet('private-key-one', password, first)
+            vault.store_wallet('private-key-two', password, second)
+            self.assertEqual({address.lower() for address in vault.list_wallets()},
+                             {first.lower(), second.lower()})
+            self.assertEqual(vault.load_wallet(password, first), 'private-key-one')
+            self.assertEqual(vault.load_wallet(password, second), 'private-key-two')
+            self.assertFalse(any(b'private-key-' in path.read_bytes()
+                                 for address in vault.list_wallets()
+                                 for path in vault.wallet_vault(address).shard_paths))
+            vault.delete_wallet(first)
+            self.assertFalse(vault.exists(first))
+            self.assertTrue(vault.exists(second))
+
 
 if __name__ == '__main__':
     unittest.main()

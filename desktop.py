@@ -18,13 +18,14 @@ os.environ['TABBY_SAFE_START'] = '1'
 BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 sys.path.insert(0, str(BASE_DIR / 'game_client'))
 
-from PySide6.QtCore import QUrl, Qt, QObject, Signal
+from PySide6.QtCore import QUrl, Qt, QObject, Signal, Slot, QFile
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
                               QStackedWidget, QButtonGroup, QDialog, QMessageBox)
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
+from PySide6.QtWebChannel import QWebChannel
 from wss_tester import MainWindow as GameWindow
 import server as shop
 
@@ -33,6 +34,12 @@ class UpdateSignals(QObject):
     checked = Signal(object)
     downloaded = Signal(str)
     failed = Signal(str)
+
+
+class DesktopClipboard(QObject):
+    @Slot(str)
+    def copyText(self, text):
+        QApplication.clipboard().setText(text)
 
 
 class LocalShopPage(QWebEnginePage):
@@ -171,7 +178,11 @@ class DesktopWindow(QMainWindow):
         # Retain the familiar desktop account field reference for tests and
         # integrations while sharing the actual game login widget.
         self.account_token = self.game.token
-        self.account_private_key_label = QLabel('BSC 钱包私钥（仅本机签名；记住时使用主密码加密分片）')
+        self.account_wallet_label = self.game.saved_wallet_label
+        account_layout.addWidget(self.account_wallet_label)
+        account_layout.addWidget(self.game.saved_wallet)
+        self.account_private_key_label = self.game.private_key_label
+        self.account_private_key_label.setText('BSC 钱包私钥（仅本机签名；记住时使用主密码加密分片）')
         account_layout.addWidget(self.account_private_key_label)
         account_layout.addWidget(self.game.private_key)
         self.account_sign_help = QLabel(
@@ -328,6 +339,8 @@ class DesktopWindow(QMainWindow):
     def update_account_auth_fields(self, *_args):
         private_mode = self.game.auth_method.currentData() == 'private_key'
         self.account_token_label.setVisible(not private_mode)
+        self.account_wallet_label.setVisible(private_mode)
+        self.game.saved_wallet.setVisible(private_mode)
         self.account_private_key_label.setVisible(private_mode)
         self.account_sign_help.setVisible(private_mode)
 
@@ -437,6 +450,20 @@ class DesktopWindow(QMainWindow):
             self.web = QWebEngineView()
             page = LocalShopPage(url, self.web)
             self.web.setPage(page)
+            self.clipboard_bridge = DesktopClipboard(self)
+            self.web_channel = QWebChannel(page)
+            self.web_channel.registerObject('desktopClipboard', self.clipboard_bridge)
+            page.setWebChannel(self.web_channel)
+            channel_file = QFile(':/qtwebchannel/qwebchannel.js')
+            if channel_file.open(QFile.OpenModeFlag.ReadOnly):
+                channel_source = bytes(channel_file.readAll()).decode('utf-8')
+                channel_file.close()
+                channel_script = QWebEngineScript()
+                channel_script.setName('tabby-desktop-clipboard-channel')
+                channel_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+                channel_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+                channel_script.setSourceCode(channel_source + "\nnew QWebChannel(qt.webChannelTransport, channel => { window.__tabbyClipboard = channel.objects.desktopClipboard; });")
+                page.scripts().insert(channel_script)
             script = QWebEngineScript()
             script.setName('tabby-desktop-mode')
             script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)

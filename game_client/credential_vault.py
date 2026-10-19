@@ -11,6 +11,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+import re
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -48,8 +49,57 @@ class CredentialVault:
     def shard_paths(self) -> tuple[Path, Path, Path]:
         return tuple(self.directory / f"wallet.part{index}" for index in range(1, 4))
 
-    def exists(self) -> bool:
-        return all(path.is_file() for path in self.shard_paths)
+    @staticmethod
+    def _wallet_component(address: str) -> str:
+        value = str(address or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+            raise ValueError("钱包地址格式无效")
+        return value.lower()
+
+    def wallet_vault(self, address: str) -> "CredentialVault":
+        return CredentialVault(self.directory / "wallets" / self._wallet_component(address))
+
+    def exists(self, address: str | None = None) -> bool:
+        if address:
+            return all(path.is_file() for path in self.wallet_vault(address).shard_paths)
+        if all(path.is_file() for path in self.shard_paths):
+            return True
+        return bool(self.list_wallets())
+
+    def list_wallets(self) -> list[str]:
+        wallet_root = self.directory / "wallets"
+        if not wallet_root.is_dir():
+            return []
+        addresses = []
+        for entry in wallet_root.iterdir():
+            address_file = entry / "address.txt"
+            if not entry.is_dir() or not address_file.is_file():
+                continue
+            try:
+                address = address_file.read_text(encoding="ascii").strip()
+                self._wallet_component(address)
+                if entry.name.lower() != address.lower():
+                    continue
+                if all(path.is_file() for path in CredentialVault(entry).shard_paths):
+                    addresses.append(address)
+            except (OSError, ValueError, UnicodeError):
+                continue
+        return sorted(addresses, key=str.lower)
+
+    def store_wallet(self, secret: str, passphrase: str, address: str) -> None:
+        normalized = self._wallet_component(address)
+        vault = self.wallet_vault(normalized)
+        vault.store(secret, passphrase)
+        address_file = vault.directory / "address.txt"
+        address_file.write_text(address, encoding="ascii")
+        if os.name != "nt":
+            address_file.chmod(0o600)
+
+    def load_wallet(self, passphrase: str, address: str) -> str:
+        return self.wallet_vault(address).load(passphrase)
+
+    def delete_wallet(self, address: str) -> None:
+        shutil.rmtree(self.wallet_vault(address).directory, ignore_errors=True)
 
     @staticmethod
     def _derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -136,6 +186,7 @@ class CredentialVault:
             raise ValueError("主密码错误或私钥分片损坏") from exc
 
     def delete(self) -> None:
+        shutil.rmtree(self.directory / "wallets", ignore_errors=True)
         for path in self.shard_paths:
             try:
                 path.unlink()

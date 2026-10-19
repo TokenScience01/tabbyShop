@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from town_navigation import find_map_path, find_town_path
 from minimap import TacticalMap
 
-from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings
+from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from credential_vault import CredentialVault
 from PySide6.QtWidgets import (
@@ -247,6 +247,32 @@ QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀"
 QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#69b3ff", "L3": "#c994ff", "L4": "#ffcf72",
                   "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#69b3ff",
                   "RARE": "#69b3ff", "EPIC": "#c994ff", "LEGENDARY": "#ffcf72"}
+NEARBY_PLAYER_TTL_SECONDS = 8.0
+
+
+def equipment_icon(item: dict) -> QIcon:
+    """Return the matching extracted game sprite for an equipment item."""
+    code = str(item.get("itemCode", "")).lower()
+    slot = str(item.get("slotType", "")).upper()
+    stem = next((candidate for candidate in ("sword", "helmet", "armor", "boots", "shoes", "ring", "amulet")
+                 if candidate in code), "")
+    if not stem:
+        stem = {"WEAPON": "sword", "HAT": "helmet", "ARMOR": "armor", "SHOES": "boots",
+                "RING": "ring", "AMULET": "amulet"}.get(slot, "")
+    if stem == "shoes":
+        stem = "boots"
+    if "spear" in code:
+        stem = "sword"  # The extracted game pack has no separate spear icon.
+    try:
+        level = item.get("equipmentLevel")
+        if level is None:
+            match = re.search(r"P([1-6])$", code.upper())
+            level = match.group(1) if match else 1
+        level = min(2, max(1, int(level or 1)))
+    except (TypeError, ValueError):
+        level = 1
+    path = Path(__file__).with_name("assets") / f"{stem}_p{level}.webp" if stem else None
+    return QIcon(str(path)) if path and path.is_file() else QIcon()
 
 
 def quality_color(value: object) -> str:
@@ -259,18 +285,93 @@ ITEM_NAMES_ZH = {str(row.get("itemCode", "")).upper(): row.get("nameZh", "")
                  for row in _item_name_rows if isinstance(row, dict)}
 ITEM_NAMES_ZH.update({str(row.get("nameEn", "")).casefold(): row.get("nameZh", "")
                       for row in _item_name_rows if isinstance(row, dict)})
-# API-only transitional code, missing from the packaged equipment-name table.
-ITEM_NAMES_ZH.setdefault("STARTER_SHOES", "新手鞋")
-
-
+_COMPACT_EN_ITEM_NAMES_ZH = {
+    re.sub(r"[^A-Z0-9]", "", str(row.get("nameEn", "")).upper()): row.get("nameZh", "")
+    for row in _item_name_rows if isinstance(row, dict) and row.get("nameEn")
+}
 def localized_item_name(item: dict) -> str:
     for key in ("nameZh", "displayNameZh"):
         value = item.get(key)
         if value:
             return str(value)
-    code = str(item.get("itemCode", "")).upper()
+    code = str(item.get("itemCode", "")).strip().upper()
     name = str(item.get("name") or item.get("displayName") or item.get("nameEn") or "")
-    return str(ITEM_NAMES_ZH.get(code) or ITEM_NAMES_ZH.get(name.casefold()) or name or code or "物品")
+    normalized_name = re.sub(r"\s+", " ", name).strip().casefold()
+    code_key = re.sub(r"[^A-Z0-9]", "", code)
+    name_key = re.sub(r"[^A-Z0-9]", "", name.strip().upper())
+    mapped = (ITEM_NAMES_ZH.get(code) or ITEM_NAMES_ZH.get(code_key)
+              or ITEM_NAMES_ZH.get(normalized_name)
+              or ITEM_NAMES_ZH.get(name.strip().casefold())
+              or ITEM_NAMES_ZH.get(name_key)
+              or _COMPACT_EN_ITEM_NAMES_ZH.get(name_key))
+    if mapped:
+        return str(mapped)
+    aliases = {"HEALTH_POTION": "生命药水", "HEALTHPOTION": "生命药水", "POTION": "生命药水",
+               "BOSS_ENTRY_TICKET": "遗迹入场券", "BOSSENTRYTICKET": "遗迹入场券",
+               "TOWN_STONE": "回城石", "TOWNSTONE": "回城石",
+               "ATONEMENT_STONE": "赎罪石", "ATONEMENTSTONE": "赎罪石"}
+    compact_code = re.sub(r"[^A-Z0-9]", "", code)
+    if code in aliases or compact_code in aliases:
+        return aliases.get(code) or aliases[compact_code]
+    mapped = ITEM_NAMES_ZH.get(compact_code)
+    if mapped:
+        return str(mapped)
+    # Do not leak raw database keys like STARTER_AMULET into the UI. Keep the
+    # original record available in the row tooltip for diagnosis instead.
+    raw_label = name or code
+    if re.search(r"[A-Za-z]", raw_label.strip()):
+        slot = SLOT_NAMES_ZH.get(str(item.get("slotType", "")).upper())
+        return f"未收录{slot}" if slot and slot != "消耗品" else "未收录物品"
+    return str(raw_label or "物品")
+
+
+_ITEM_ATTRIBUTE_NAMES_ZH = {
+    "ATTACK": "攻击", "DEFENSE": "防御", "HEALTH": "生命", "MAX_HEALTH": "生命",
+    "HEALTH_REGEN": "生命恢复", "ATTACK_SPEED": "攻击速度", "ATTACK_SPEED_PERCENT": "攻击速度",
+    "MOVE_SPEED": "移动速度", "MOVE_SPEED_PERCENT": "移动速度", "CRITICAL": "暴击",
+    "CRITICAL_CHANCE": "暴击率", "CRITICAL_CHANCE_PERCENT": "暴击率", "LUCK": "幸运",
+}
+
+
+def equipment_attribute_lines(item: dict) -> list[str]:
+    """Format the stat fields used by the game's equipment panel."""
+    lines: list[str] = []
+    attributes = item.get("attributes", [])
+    if isinstance(attributes, list):
+        for attribute in attributes:
+            if not isinstance(attribute, dict):
+                continue
+            code = str(attribute.get("code", "")).upper()
+            name = str(attribute.get("displayNameZh") or _ITEM_ATTRIBUTE_NAMES_ZH.get(code)
+                       or attribute.get("displayName") or code or "属性")
+            value = attribute.get("value", 0)
+            suffix = "/秒" if code == "HEALTH_REGEN" else (
+                "%" if attribute.get("percentage") or code in {"LUCK", "CRITICAL_CHANCE", "CRITICAL_CHANCE_PERCENT",
+                                                                  "ATTACK_SPEED", "ATTACK_SPEED_PERCENT",
+                                                                  "MOVE_SPEED", "MOVE_SPEED_PERCENT"} else "")
+            try:
+                number = float(value)
+                shown = str(int(number)) if number.is_integer() else f"{number:g}"
+            except (TypeError, ValueError):
+                shown = str(value)
+            lines.append(f"{name} +{shown}{suffix}")
+    # Some API payloads expose rolled stats only as top-level fields, or mix
+    # top-level values with the rolled-attribute array.
+    if not lines:
+        for key, name, suffix in (
+            ("attack", "攻击", ""), ("defense", "防御", ""), ("maxHealth", "生命", ""),
+            ("healthRegen", "生命恢复", "/秒"), ("attackSpeedPercent", "攻击速度", "%"),
+            ("moveSpeedPercent", "移动速度", "%"), ("criticalChancePercent", "暴击率", "%"),
+            ("luck", "幸运", "%"),
+        ):
+            try:
+                value = float(item.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value:
+                shown = str(int(value)) if value.is_integer() else f"{value:g}"
+                lines.append(f"{name} +{shown}{suffix}")
+    return lines or ["暂无额外属性"]
 
 
 def localized_monster_name(monster: dict) -> str:
@@ -361,6 +462,9 @@ class MainWindow(QMainWindow):
         self.combat_timer = QTimer(self)
         self.combat_timer.setInterval(350)
         self.combat_timer.timeout.connect(self.auto_attack_tick)
+        self.potion_timer = QTimer(self)
+        self.potion_timer.setInterval(1000)
+        self.potion_timer.timeout.connect(self.try_auto_use_potion)
         self.chase_timer = QTimer(self)
         self.chase_timer.setInterval(66)
         self.chase_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -432,9 +536,15 @@ class MainWindow(QMainWindow):
         self.private_key = QLineEdit()
         self.private_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.private_key.setPlaceholderText("输入 EVM 私钥（BSC / chainId 56）；记住时用主密码加密分片")
-        self.private_key.textEdited.connect(self.invalidate_signed_session)
-        private_key_label = QLabel("钱包私钥（本机签名）")
-        private_key_label.setObjectName("fieldLabel")
+        self.private_key.textEdited.connect(self.on_private_key_edited)
+        self.saved_wallet_label = QLabel("已保存钱包地址")
+        self.saved_wallet_label.setObjectName("fieldLabel")
+        self.saved_wallet = QComboBox()
+        self.saved_wallet.setMinimumHeight(38)
+        self.saved_wallet.addItem("输入新的私钥", "")
+        self.saved_wallet.currentIndexChanged.connect(self.on_saved_wallet_selected)
+        self.private_key_label = QLabel("钱包私钥（本机签名）")
+        self.private_key_label.setObjectName("fieldLabel")
         origin_label = QLabel("Origin")
         token_label = QLabel("游戏会话 Token（不要粘贴钱包私钥）")
         for label in (origin_label, token_label):
@@ -443,10 +553,11 @@ class MainWindow(QMainWindow):
         fields.addWidget(token_label, 0, 1)
         fields.addWidget(self.origin, 1, 0)
         fields.addWidget(self.token, 1, 1)
-        fields.addWidget(private_key_label, 2, 0, 1, 2)
-        fields.addWidget(self.private_key, 3, 0, 1, 2)
-        private_key_label.hide()
-        self.private_key.hide()
+        fields.addWidget(self.saved_wallet_label, 2, 0, 1, 2)
+        fields.addWidget(self.saved_wallet, 3, 0, 1, 2)
+        fields.addWidget(self.private_key_label, 4, 0, 1, 2)
+        fields.addWidget(self.private_key, 5, 0, 1, 2)
+        self.refresh_saved_wallets()
         fields.setColumnStretch(0, 1)
         fields.setColumnStretch(1, 1)
         card_layout.addLayout(fields)
@@ -600,10 +711,10 @@ class MainWindow(QMainWindow):
         map_title.setObjectName("sectionTitle")
         map_heading.addWidget(map_title)
         map_heading.addStretch()
-        legend = QLabel("青色 · 角色    粉色 · 怪物    金色 · 精英    蓝色 · 入口")
+        legend = QLabel("青色 · 角色    浅蓝 · 玩家    粉色 · 怪物    金色 · 精英    蓝色 · 入口")
         legend.setObjectName("subtitle")
-        legend.setMinimumWidth(360)
         legend.setWordWrap(True)
+        legend.setMinimumWidth(360)
         map_heading.addWidget(legend)
         map_layout.addLayout(map_heading)
         self.minimap = TacticalMap(self, PORTAL_CENTERS)
@@ -633,6 +744,8 @@ class MainWindow(QMainWindow):
         self.profile_refresh_inflight = False
         self.profile_refreshed_at = 0.0
         self.profile_refresh_queued = False
+        self.last_world_status_render_at = 0.0
+        self.last_world_status_map = None
         self.balance_refreshed_at = 0.0
 
         travel_card = QFrame()
@@ -723,9 +836,10 @@ class MainWindow(QMainWindow):
         self.auto_quest = QCheckBox("完成后自动接打怪任务")
         self.auto_quest.setChecked(True)
         self.auto_quest.setProperty("taskOption", True)
+        self.auto_quest.setToolTip("当前打怪任务完成后领取下一项；是否自动攻击由左侧战斗开关控制。")
         self.task_limited_mode = QCheckBox("任务有限模式")
         self.task_limited_mode.setProperty("taskOption", True)
-        self.task_limited_mode.setToolTip("只攻击当前进行中的怪物任务目标；完成、无可接任务或今日领取已满时暂停，不转为自由刷怪。")
+        self.task_limited_mode.setToolTip("与自动接任务配合使用：只打当前任务目标；暂时没有任务时暂停攻击，不转为自由刷怪。")
         self.task_limited_mode.toggled.connect(self.on_task_limited_mode_changed)
         self.quest_map_auto = QCheckBox("按任务地图自动进图")
         self.quest_map_auto.setProperty("taskOption", True)
@@ -774,15 +888,42 @@ class MainWindow(QMainWindow):
         self.combat_status.setObjectName("subtitle")
         self.combat_status.setWordWrap(True)
         combat_layout.addWidget(self.combat_status)
-        self.monster_table = QTableWidget(0, 6)
-        self.monster_table.setHorizontalHeaderLabels(["encounterId", "怪物", "品级", "生命", "坐标", "距离"])
+        combat_stats = QHBoxLayout()
+        self.combat_stats_layout = combat_stats
+        combat_stats.setSpacing(8)
+        self.combat_stat_labels = {}
+        self.combat_stat_cards = {}
+        for key, title, asset in (("kills", "击败", "monster.webp"),
+                                  ("damage", "伤害", "warrior-idle.webp"),
+                                  ("hits", "命中", "quest.webp"),
+                                  ("potions", "药水", "location.webp")):
+            stat = QFrame()
+            stat.setObjectName("statChip")
+            stat_row = QHBoxLayout(stat)
+            stat_row.setContentsMargins(8, 5, 8, 5)
+            art = QLabel()
+            art.setFixedSize(22, 22)
+            pix = QPixmap(str(Path(__file__).with_name("assets") / asset))
+            if not pix.isNull():
+                art.setPixmap(pix.scaled(20, 20, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+            stat_row.addWidget(art)
+            label = QLabel(f"{title} 0")
+            label.setObjectName("subtitle")
+            stat_row.addWidget(label)
+            combat_stats.addWidget(stat, 1)
+            self.combat_stat_labels[key] = label
+            self.combat_stat_cards[key] = stat
+        combat_layout.addLayout(combat_stats)
+        self.monster_table = QTableWidget(0, 7)
+        self.monster_table.setHorizontalHeaderLabels(["encounterId", "怪物", "等级", "品级", "生命", "坐标", "距离"])
         self.monster_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.monster_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.monster_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.monster_table.setAlternatingRowColors(True)
         self.monster_table.verticalHeader().setVisible(False)
         self.monster_table.setColumnHidden(0, True)
-        for col in (1, 2, 3, 4, 5):
+        for col in (1, 2, 3, 4, 5, 6):
             self.monster_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.monster_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.monster_table.setMinimumHeight(145)
@@ -795,10 +936,15 @@ class MainWindow(QMainWindow):
         self.attack_button.clicked.connect(self.attack_selected_monster)
         self.auto_attack = QCheckBox("自动追击并攻击附近怪物")
         self.auto_attack.toggled.connect(self.toggle_auto_attack)
+        self.auto_potion = QCheckBox("自动使用生命药水")
+        self.auto_potion.setChecked(False)
+        self.auto_potion.setToolTip("默认关闭。开启后仅在生命低于 50%、有药水且冷却结束时请求使用。")
+        self.auto_potion.toggled.connect(self.on_auto_potion_changed)
         self.elite_only = QCheckBox("只打精英怪")
         self.elite_only.toggled.connect(self.on_elite_filter_changed)
         combat_controls.addWidget(self.attack_button)
         combat_controls.addWidget(self.auto_attack)
+        combat_controls.addWidget(self.auto_potion)
         combat_controls.addWidget(self.elite_only)
         self.encounter_id_toggle = QPushButton("查看 encounterId")
         self.encounter_id_toggle.setCheckable(True)
@@ -807,6 +953,31 @@ class MainWindow(QMainWindow):
         combat_controls.addWidget(self.encounter_id_toggle)
         combat_controls.addStretch(1)
         combat_layout.addLayout(combat_controls)
+        level_controls = QHBoxLayout()
+        self.monster_level_limited = QCheckBox("限制怪物等级")
+        self.monster_level_limited.setToolTip("开启后，自动搜怪、追击和攻击都会仅选择等级范围内的怪物。")
+        self.monster_level_min = QSpinBox()
+        self.monster_level_min.setRange(1, 9999)
+        self.monster_level_min.setPrefix("最低 ")
+        self.monster_level_min.setToolTip("怪物等级下限（包含该等级）")
+        self.monster_level_max = QSpinBox()
+        self.monster_level_max.setRange(1, 9999)
+        self.monster_level_max.setPrefix("最高 ")
+        self.monster_level_max.setToolTip("怪物等级上限（包含该等级）")
+        self.monster_level_limited.setChecked(
+            self.settings.value("monsterLevelLimited", False, type=bool))
+        self.monster_level_min.setValue(self.settings.value("monsterLevelMin", 1, type=int))
+        self.monster_level_max.setValue(self.settings.value("monsterLevelMax", 9999, type=int))
+        self.monster_level_min.setEnabled(self.monster_level_limited.isChecked())
+        self.monster_level_max.setEnabled(self.monster_level_limited.isChecked())
+        self.monster_level_limited.toggled.connect(self.on_monster_level_filter_changed)
+        self.monster_level_min.valueChanged.connect(self.on_monster_level_bound_changed)
+        self.monster_level_max.valueChanged.connect(self.on_monster_level_bound_changed)
+        level_controls.addWidget(self.monster_level_limited)
+        level_controls.addWidget(self.monster_level_min)
+        level_controls.addWidget(self.monster_level_max)
+        level_controls.addStretch(1)
+        combat_layout.addLayout(level_controls)
         combat_hint = QLabel("自动模式会搜索并追击当前地图怪物；北部雪地暂无怪物时会沿已验证路线巡逻搜索。")
         combat_hint.setObjectName("subtitle")
         combat_layout.addWidget(combat_hint)
@@ -953,21 +1124,24 @@ class MainWindow(QMainWindow):
         columns = QHBoxLayout()
         columns.setSpacing(14)
         left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(14)
         left_panel = QWidget(root)
         left_panel.setLayout(left)
         left_panel.setFixedWidth(345)
-        columns.addWidget(left_panel)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        columns.addWidget(left_panel, 0, Qt.AlignmentFlag.AlignTop)
         right = QVBoxLayout()
         right.setSpacing(14)
         columns.addLayout(right, 1)
         layout.addLayout(columns, 1)
 
         character, box = card("角色概览")
+        self.character_card = character
         character_row = QHBoxLayout()
         portrait = QLabel()
         self.character_portrait = portrait
-        portrait.setFixedSize(68, 92)
+        portrait.setFixedSize(82, 108)
         portrait.setAlignment(Qt.AlignmentFlag.AlignCenter)
         portrait.setText("连接后\n加载角色")
         portrait.setStyleSheet("background:#292E2D;border:1px solid #414846;border-radius:10px;color:#AAB4B1;font-size:10px;")
@@ -998,12 +1172,14 @@ class MainWindow(QMainWindow):
         self.fatigue_bar = QProgressBar()
         character_bars = QVBoxLayout()
         character_bars.setSpacing(4)
-        for title, bar in (("生命", self.health_bar), ("疲劳余量", self.fatigue_bar)):
+        self.experience_bar = QProgressBar()
+        for title, bar in (("生命", self.health_bar), ("疲劳余量", self.fatigue_bar), ("经验进度", self.experience_bar)):
             bar.setRange(0, 100)
             bar.setValue(0)
             bar.setFormat("等待数据")
             bar.setFixedHeight(18)
-            bar.setStyleSheet("QProgressBar {background:#191D1E;border:1px solid #444C4A;border-radius:5px;text-align:center;color:#F1F4F2;font-size:11px;} QProgressBar::chunk {background:" + ("#648c50" if bar is self.health_bar else "#B69460") + ";border-radius:4px;}")
+            fill = "#648c50" if bar is self.health_bar else "#B69460" if bar is self.fatigue_bar else "#5798A8"
+            bar.setStyleSheet("QProgressBar {background:#191D1E;border:1px solid #444C4A;border-radius:5px;text-align:center;color:#F1F4F2;font-size:11px;} QProgressBar::chunk {background:" + fill + ";border-radius:4px;}")
             bar_row = QHBoxLayout()
             label = QLabel(title)
             label.setObjectName("subtitle")
@@ -1063,7 +1239,7 @@ class MainWindow(QMainWindow):
         box.addLayout(gear)
         battle, box = card("战斗策略")
         self.auto_attack.setText("自动追击与攻击")
-        for widget in (self.auto_attack, self.elite_only, self.attack_button, self.combat_status):
+        for widget in (self.auto_attack, self.auto_potion, self.elite_only, self.attack_button):
             place(box, widget)
         left.addWidget(battle)
         travel, box = card("地图与复活")
@@ -1101,19 +1277,45 @@ class MainWindow(QMainWindow):
         self.minimap.setFixedHeight(210)
         place(box, self.minimap)
         legend = QLabel("<span style='color:#afc69e'>●</span> 角色　"
+                        "<span style='color:#45B9D0'>●</span> 玩家　"
                         "<span style='color:#c78f86'>●</span> 怪物　"
                         "<span style='color:#cfb77b'>◆</span> 精英　"
                         "<span style='color:#9cacae'>□</span> 入口　┄ 路线")
         legend.setObjectName("subtitle")
-        legend.hide()
+        legend.setWordWrap(True)
+        legend.setMaximumHeight(34)
         place(box, self.map_activity)
         self.map_activity.setMaximumHeight(30)
+        place(box, legend)
         overview = QHBoxLayout()
         overview.setSpacing(14)
         character.setMinimumHeight(0)
-        map_card.setFixedHeight(300)
-        overview.addWidget(character, 1, Qt.AlignmentFlag.AlignTop)
-        overview.addWidget(map_card, 0, Qt.AlignmentFlag.AlignTop)
+        map_card.setFixedHeight(340)
+        self.minimap.setFixedHeight(190)
+        character.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        overview.addWidget(character, 1)
+        map_column = QWidget(root)
+        map_column.setFixedWidth(260)
+        map_column_layout = QVBoxLayout(map_column)
+        map_column_layout.setContentsMargins(0, 0, 0, 0)
+        map_column_layout.setSpacing(12)
+        map_column_layout.addWidget(map_card)
+        battle_feed, feed_box = card("战斗动态")
+        self.combat_status.setParent(root)
+        self.combat_status.setMinimumHeight(44)
+        feed_box.addWidget(self.combat_status)
+        stats_grid = QGridLayout()
+        stats_grid.setContentsMargins(0, 0, 0, 0)
+        stats_grid.setHorizontalSpacing(6)
+        stats_grid.setVerticalSpacing(6)
+        for index, stat in enumerate(self.combat_stat_cards.values()):
+            stat.setParent(root)
+            self.combat_stats_layout.removeWidget(stat)
+            stats_grid.addWidget(stat, index // 2, index % 2)
+        feed_box.addLayout(stats_grid)
+        map_column_layout.addWidget(battle_feed)
+        map_column_layout.addStretch(1)
+        overview.addWidget(map_column, 0, Qt.AlignmentFlag.AlignTop)
         right.addLayout(overview)
         tabs = QTabWidget(root)
         tabs.setDocumentMode(True)
@@ -1122,21 +1324,45 @@ class MainWindow(QMainWindow):
         quest_box = QVBoxLayout(quest_page)
         quest_box.setContentsMargins(10, 12, 10, 10)
         quest_box.setSpacing(10)
-        quest_box.setAlignment(Qt.AlignmentFlag.AlignTop)
         quest_row = QHBoxLayout()
-        quest_row.setSpacing(12)
-        place(quest_row, self.auto_quest)
-        place(quest_row, self.task_limited_mode)
-        place(quest_row, self.quest_map_auto)
+        task_heading = QLabel("任务管理")
+        task_heading.setObjectName("fieldLabel")
+        quest_row.addWidget(task_heading)
         quest_row.addStretch(1)
         self.refresh_profile_button.setFixedWidth(132)
         place(quest_row, self.refresh_profile_button)
         quest_box.addLayout(quest_row)
+        task_options = QFrame()
+        task_options.setObjectName("taskOptions")
+        task_options_layout = QVBoxLayout(task_options)
+        task_options_layout.setContentsMargins(12, 10, 12, 10)
+        task_options_layout.setSpacing(8)
+        task_options_heading = QHBoxLayout()
+        task_options_title = QLabel("任务自动化")
+        task_options_title.setObjectName("fieldLabel")
+        task_options_heading.addWidget(task_options_title)
+        task_options_hint = QLabel("自动接取、目标限制与按任务地图移动可组合使用")
+        task_options_hint.setObjectName("subtitle")
+        task_options_heading.addWidget(task_options_hint)
+        task_options_heading.addStretch(1)
+        task_options_layout.addLayout(task_options_heading)
+        quest_options_row = QHBoxLayout()
+        quest_options_row.setSpacing(8)
+        for option in (self.auto_quest, self.task_limited_mode, self.quest_map_auto):
+            option.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            option.setMinimumHeight(40)
+            quest_options_row.addWidget(option, 1)
+        task_options_layout.addLayout(quest_options_row)
+        quest_box.addWidget(task_options)
         self.quest_status.setFixedHeight(24)
         place(quest_box, self.quest_status)
-        self.quest_table.setMinimumHeight(160)
-        self.quest_table.setMaximumHeight(240)
-        place(quest_box, self.quest_table)
+        self.quest_table.verticalHeader().setDefaultSectionSize(44)
+        self.quest_table.horizontalHeader().setMinimumHeight(44)
+        self.quest_table.setStyleSheet("font-size: 13px;")
+        self.quest_table.setMinimumHeight(250)
+        self.quest_table.setMaximumHeight(16777215)
+        self.quest_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        place(quest_box, self.quest_table, 1)
         tabs.addTab(quest_page, "任务")
         monsters_page = QWidget()
         monsters_box = QVBoxLayout(monsters_page)
@@ -1171,7 +1397,7 @@ class MainWindow(QMainWindow):
         self.encounter_id_toggle.setParent(root)
         self.encounter_id_toggle.hide()
         self.monster_table.setColumnHidden(0, False)
-        self.monster_table.horizontalHeader().moveSection(0, 5)
+        self.monster_table.horizontalHeader().moveSection(0, 6)
         self.monster_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.monster_table.setColumnWidth(0, 285)
         self.monster_table.setMinimumHeight(120)
@@ -1222,31 +1448,53 @@ class MainWindow(QMainWindow):
         inventory_box = QVBoxLayout(inventory_card)
         inventory_box.setContentsMargins(14, 12, 14, 14)
         inventory_box.addWidget(QLabel("背包与装备"))
-        self.social_inventory_table = QTableWidget(0, 5)
-        self.social_inventory_table.setHorizontalHeaderLabels(["物品", "部位", "品质", "等级", "状态"])
+        self.social_inventory_table = QTableWidget(0, 6)
+        self.social_inventory_table.setHorizontalHeaderLabels(["物品", "部位", "品质", "等级", "属性", "状态"])
         self.social_inventory_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.social_inventory_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.social_inventory_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.social_inventory_table.itemSelectionChanged.connect(self.update_inventory_action_button)
         self.social_inventory_table.verticalHeader().setVisible(False)
         self.social_inventory_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in range(1, 5):
+        for col in range(1, 6):
             self.social_inventory_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.social_inventory_table.setMinimumHeight(220)
         self.social_inventory_table.setMaximumHeight(440)
         inventory_box.addWidget(self.social_inventory_table, 1)
+        selected_preview = QFrame()
+        selected_preview.setObjectName("emptyState")
+        preview_layout = QHBoxLayout(selected_preview)
+        preview_layout.setContentsMargins(10, 8, 10, 8)
+        self.selected_item_icon = QLabel()
+        self.selected_item_icon.setFixedSize(36, 36)
+        preview_layout.addWidget(self.selected_item_icon)
+        preview_copy = QVBoxLayout()
+        preview_copy.setSpacing(2)
+        self.selected_item_name = QLabel("未选择物品")
+        self.selected_item_name.setObjectName("sectionTitle")
+        preview_copy.addWidget(self.selected_item_name)
+        self.selected_item_detail = QLabel("点击背包中的一行查看物品详情，再执行装备操作。")
+        self.selected_item_detail.setObjectName("subtitle")
+        self.selected_item_detail.setWordWrap(True)
+        preview_copy.addWidget(self.selected_item_detail)
+        self.selected_item_attributes = QLabel("属性：选择装备查看")
+        self.selected_item_attributes.setObjectName("subtitle")
+        self.selected_item_attributes.setWordWrap(True)
+        preview_copy.addWidget(self.selected_item_attributes)
+        preview_layout.addLayout(preview_copy, 1)
+        inventory_box.addWidget(selected_preview)
         inventory_actions = QHBoxLayout()
         self.equip_item_button = QPushButton("装备所选")
         self.equip_item_button.setObjectName("primaryButton")
         self.equip_item_button.clicked.connect(self.equip_selected_item)
         self.sell_item_button = QPushButton("上架出售")
         self.sell_item_button.setObjectName("secondaryButton")
-        self.sell_item_button.setToolTip("当前提取到的游戏客户端没有物品上架接口定义，因此暂不发送交易请求。")
-        self.sell_item_button.setEnabled(False)
+        self.sell_item_button.setToolTip("当前游戏客户端没有可核实的装备上架接口；点击查看状态，不会发送猜测的交易请求。")
+        self.sell_item_button.clicked.connect(self.explain_item_listing_status)
         inventory_actions.addWidget(self.equip_item_button)
         inventory_actions.addWidget(self.sell_item_button)
         inventory_box.addLayout(inventory_actions)
-        self.inventory_action_status = QLabel("装备操作会调用游戏现有装备接口；出售等待服务端上架协议。")
+        self.inventory_action_status = QLabel("装备可直接操作；上架按钮会说明当前服务端协议状态。")
         self.inventory_action_status.setObjectName("subtitle")
         self.inventory_action_status.setWordWrap(True)
         inventory_box.addWidget(self.inventory_action_status)
@@ -1338,6 +1586,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 700)
         self.resize(1180, 850)
         self.setStyleSheet(self.styleSheet() + """
+            QFrame#taskOptions { background:#1B1E1F; border:1px solid #363D3C; border-radius:10px; }
             QLabel { color: #E8ECEB; }
             QTabWidget::pane { border: 0; background: transparent; }
             QTabBar::tab { background: transparent; color: #AAB4B1; padding: 9px 13px; min-height: 26px; border: 0; border-bottom: 2px solid transparent; margin-right: 8px; }
@@ -1376,6 +1625,7 @@ class MainWindow(QMainWindow):
             QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #17191A; color: #E8ECEB; }
             QFrame#card { background: #222627; border: 1px solid #363D3C; border-radius: 12px; }
             QFrame#emptyState { background: #1B1E1F; border: 1px dashed #4A514E; border-radius: 10px; }
+            QFrame#statChip { background:#292E2D; border:1px solid #414846; border-radius:7px; }
             QFrame#sessionCard { background: #252A29; border: 1px solid #66583E; border-radius: 10px; }
             QLabel#title { color: #F3F5F3; font-size: 23px; font-weight: 700; }
             QLabel#subtitle { color: #AAB4B1; font-size: 12px; }
@@ -1429,6 +1679,24 @@ class MainWindow(QMainWindow):
         callback = getattr(self, "on_state_change", None)
         if callable(callback):
             callback(state)
+
+    def set_combat_feedback(self, message: str, tone: str = "default", duration_ms: int = 2600) -> None:
+        """Briefly color combat feedback while preserving the normal subtitle style."""
+        if not hasattr(self, "combat_status"):
+            return
+        colors = {"attack": "#66C7D8", "hit": "#74C878", "critical": "#E7B85E", "error": "#E47782"}
+        self._combat_feedback_revision = getattr(self, "_combat_feedback_revision", 0) + 1
+        revision = self._combat_feedback_revision
+        self.combat_status.setText(message)
+        color = colors.get(tone)
+        self.combat_status.setStyleSheet(f"color: {color}; font-weight: 700;" if color else "")
+
+        def restore_default() -> None:
+            if revision == self._combat_feedback_revision and hasattr(self, "combat_status"):
+                self.combat_status.setStyleSheet("")
+
+        if color:
+            QTimer.singleShot(duration_ms, restore_default)
 
     def on_connected(self, ws: MiniWebSocket) -> None:
         if ws is None:
@@ -1516,6 +1784,7 @@ class MainWindow(QMainWindow):
             return
         self._vault_passphrase = None
         self.credential_vault.delete()
+        self.refresh_saved_wallets()
         try:
             secure_keyring().delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
         except Exception:
@@ -1660,10 +1929,43 @@ class MainWindow(QMainWindow):
     def update_auth_fields(self, *_args) -> None:
         private_mode = self.auth_method.currentData() == "private_key"
         self.token.setVisible(not private_mode)
+        self.saved_wallet_label.setVisible(private_mode)
+        self.saved_wallet.setVisible(private_mode)
+        self.private_key_label.setVisible(private_mode)
         self.private_key.setVisible(private_mode)
         if not private_mode:
             self.private_key.clear()
             self._vault_passphrase = None
+
+    def refresh_saved_wallets(self) -> None:
+        if not hasattr(self, "saved_wallet"):
+            return
+        selected = str(self.saved_wallet.currentData() or self.settings.value("lastWalletAddress", ""))
+        addresses = self.credential_vault.list_wallets()
+        self.saved_wallet.blockSignals(True)
+        self.saved_wallet.clear()
+        self.saved_wallet.addItem("输入新的私钥", "")
+        for address in addresses:
+            self.saved_wallet.addItem(address, address)
+        index = self.saved_wallet.findData(selected) if selected else -1
+        if index < 0 and len(addresses) == 1:
+            index = self.saved_wallet.findData(addresses[0])
+        self.saved_wallet.setCurrentIndex(max(0, index))
+        self.saved_wallet.blockSignals(False)
+
+    def on_saved_wallet_selected(self, index: int) -> None:
+        address = str(self.saved_wallet.itemData(index) or "") if index >= 0 else ""
+        if address:
+            self.settings.setValue("lastWalletAddress", address)
+            self.private_key.clear()
+        self.invalidate_signed_session()
+
+    def on_private_key_edited(self, *_args) -> None:
+        if self.saved_wallet.currentData():
+            self.saved_wallet.blockSignals(True)
+            self.saved_wallet.setCurrentIndex(0)
+            self.saved_wallet.blockSignals(False)
+        self.invalidate_signed_session()
 
     def invalidate_signed_session(self, *_args) -> None:
         self.signed_session_token = ""
@@ -1685,23 +1987,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "需要安全连接", "私钥签名登录只允许通过 wss:// 地址发起。")
             return
         private_key = self.private_key.text().strip()
+        selected_wallet_address = str(self.saved_wallet.currentData() or "") if not private_key else ""
         remember_private_key = self.remember_private_key.isChecked()
         vault_passphrase = None
-        if not private_key and remember_private_key and self.credential_vault.exists():
+        if not private_key and selected_wallet_address:
             vault_passphrase = self._vault_passphrase
             if not vault_passphrase:
                 vault_passphrase = self.ask_vault_passphrase(confirm=False)
                 if vault_passphrase is None:
                     return
             try:
-                private_key = self.credential_vault.load(vault_passphrase)
-                self.bridge.keyring_status.emit("主密码验证成功；已从加密分片读取私钥。")
+                private_key = self.credential_vault.load_wallet(vault_passphrase, selected_wallet_address)
+                self.bridge.keyring_status.emit(f"主密码验证成功；已解锁 {selected_wallet_address[:8]}…{selected_wallet_address[-6:]}。")
             except (OSError, ValueError) as exc:
                 self._vault_passphrase = None
                 QMessageBox.warning(self, "无法解锁私钥", str(exc))
                 self.bridge.keyring_status.emit("解锁失败；请确认主密码或检查分片文件。")
                 return
-        elif not private_key and remember_private_key:
+        elif not private_key and self.credential_vault.list_wallets():
+            QMessageBox.information(self, "选择钱包地址", "本机保存了多个钱包，请先选择要登录的钱包地址；也可以输入新的私钥。")
+            return
+        elif not private_key and remember_private_key and self.credential_vault.exists():
             # One-time migration from releases that kept the credential in
             # the OS keyring. New writes always go to the passphrase vault.
             try:
@@ -1717,6 +2023,12 @@ class MainWindow(QMainWindow):
                 legacy_key = ""
                 self.bridge.keyring_status.emit("发现旧版保存项；成功登录后会迁移为主密码加密分片。")
         if not private_key:
+            if self._auto_reconnect_login:
+                self._auto_reconnect_login = False
+                self.reconnect_timer.stop()
+                self.bridge.state.emit("自动重连需要先选择钱包并解锁")
+                self.append_log("自动重连已暂停：本次运行中没有已解锁的钱包私钥。")
+                return
             QMessageBox.information(self, "需要私钥", "请输入用于本机签名的钱包私钥。")
             return
         if remember_private_key:
@@ -1748,6 +2060,8 @@ class MainWindow(QMainWindow):
                 from eth_account.messages import encode_defunct
 
                 account = Account.from_key(key_material)
+                if selected_wallet_address and account.address.lower() != selected_wallet_address.lower():
+                    raise RuntimeError("解锁出的私钥与所选钱包地址不匹配")
 
                 def request(path: str, body: dict, bearer: str | None = None) -> dict:
                     # The membership API applies browser-origin validation.
@@ -1827,8 +2141,8 @@ class MainWindow(QMainWindow):
                 remembered = False
                 if remember_private_key:
                     try:
-                        self.credential_vault.store(key_material, vault_passphrase)
-                        remembered = self.credential_vault.load(vault_passphrase) == key_material
+                        self.credential_vault.store_wallet(key_material, vault_passphrase, account.address)
+                        remembered = self.credential_vault.load_wallet(vault_passphrase, account.address) == key_material
                         if not remembered:
                             raise RuntimeError("加密分片写入后校验失败")
                         try:
@@ -1890,6 +2204,11 @@ class MainWindow(QMainWindow):
             self.append_log(str(result["remember_error"]))
             self.bridge.keyring_status.emit("保存失败；请确认磁盘权限后重试。")
         elif result.get("remembered"):
+            self.refresh_saved_wallets()
+            index = self.saved_wallet.findData(address)
+            if index >= 0:
+                self.saved_wallet.setCurrentIndex(index)
+                self.settings.setValue("lastWalletAddress", address)
             self.append_log("钱包私钥已加密分片保存并完成解密校验；主密码未写入磁盘。")
             self.bridge.keyring_status.emit("AES-GCM 校验成功；三片密文已保存。")
         self.append_log(f"钱包签名验证成功：{address[:8]}…{address[-6:]}；游戏 token 已留在内存中。")
@@ -1974,6 +2293,8 @@ class MainWindow(QMainWindow):
             self.move_timer.stop()
         if hasattr(self, "combat_timer"):
             self.combat_timer.stop()
+        if hasattr(self, "potion_timer"):
+            self.potion_timer.stop()
         if hasattr(self, "chase_timer"):
             self.chase_timer.stop()
         if hasattr(self, "patrol_timer"):
@@ -2011,6 +2332,8 @@ class MainWindow(QMainWindow):
         self.last_self_state = {}
         self.last_progress_state = {}
         self.last_peers = []
+        self.peer_cache = {}
+        self.peer_last_seen = {}
         self.api_profile = {}
         self.api_equipment = {}
         self.profile_refresh_inflight = False
@@ -2034,6 +2357,9 @@ class MainWindow(QMainWindow):
         self.patrol_anchor = None
         self.patrol_direction_index = 0
         self.patrol_ring = 320.0
+        self.auto_route_retry_count = 0
+        self.auto_potion_pending = False
+        self.combat_stats = {"kills": 0, "damage": 0, "hits": 0, "potions": 0}
         self.patrol_last_at = None
         self.patrol_retry_after = 0.0
         self.invalid_target_until = {}
@@ -2041,6 +2367,7 @@ class MainWindow(QMainWindow):
             self.monster_table.setRowCount(0)
             self.combat_status.setText("等待服务端怪物快照和攻击票据…")
             self.update_attack_button()
+        self.update_combat_stats()
         self.travel_attempt = getattr(self, "travel_attempt", 0) + 1
         if hasattr(self, "quest_table"):
             self.quest_table.setRowCount(0)
@@ -2080,10 +2407,16 @@ class MainWindow(QMainWindow):
             map_name = MAP_NAMES.get(self.current_map, str(self.current_map))
             self.current_map_label.setText(f"当前所在地图  ·  {map_name.split(' · ')[-1]}")
             self.current_map_label.setToolTip(map_name)
-            self.world_status.setText(
-                f"{'预计坐标' if self.position_estimated else '坐标'}：({self.world_x}, {self.world_y})"
-                f"    修订：{self.movement_revision}    生命序号：{self.life}"
-            )
+            now = time.monotonic()
+            # Keep predicted coordinates useful during travel without repainting
+            # protocol counters on every movement tick.
+            if (self.current_map != self.last_world_status_map
+                    or now - self.last_world_status_render_at >= 2.0
+                    or self.world_status.text().startswith("等待")):
+                prefix = "预计坐标" if self.position_estimated else "坐标"
+                self.world_status.setText(f"{prefix}：({self.world_x}, {self.world_y})")
+                self.last_world_status_render_at = now
+                self.last_world_status_map = self.current_map
 
     def accept_packet(self, packet: dict) -> None:
         kind = packet.get("type")
@@ -2125,10 +2458,23 @@ class MainWindow(QMainWindow):
             if isinstance(self_state, dict):
                 # Match accept_snapshot in pvp_client.gd: self is a partial
                 # object in delta snapshots, including the common empty {}.
+                previous_potions = self.last_self_state.get("healthPotions")
                 if not bool(packet.get("delta", False)):
                     self.last_self_state.clear()
                 self.last_self_state.update(self_state)
                 self_state = self.last_self_state
+                current_potions = self_state.get("healthPotions")
+                if isinstance(previous_potions, (int, float)) and isinstance(current_potions, (int, float)):
+                    used = max(0, int(previous_potions) - int(current_potions))
+                    if used:
+                        self.combat_stats["potions"] += used
+                        self.update_combat_stats()
+                        self.auto_potion_pending = False
+                try:
+                    if int(self_state.get("potionCooldownMs", 0) or 0) > 0:
+                        self.auto_potion_pending = False
+                except (TypeError, ValueError):
+                    pass
                 # A respawn acknowledgement carries the authoritative spawn
                 # position; a delta may omit dead=False from its self object.
                 if operation == "respawn" and isinstance(packet.get("position"), dict):
@@ -2199,6 +2545,8 @@ class MainWindow(QMainWindow):
                         self.combat_status.setText(f"收到击败奖励事件：{encounter_id}；正在同步经验与任务进度…")
                     if encounter_id not in self.claimed_encounters:
                         self.claimed_encounters.add(encounter_id)
+                        self.combat_stats["kills"] += 1
+                        self.update_combat_stats()
                         self.claim_encounter_reward(encounter_id)
             if not self.world_ready:
                 self.world_ready = True
@@ -2208,10 +2556,10 @@ class MainWindow(QMainWindow):
                 self.telemetry_timer.start()
                 self.send_stationary_sync(force=True)
                 self.position_sync_timer.start()
-                if not self.server_dead and not self.auto_attack.isChecked():
-                    self.auto_attack.setChecked(True)
-                elif self.auto_attack.isChecked() and not self.server_dead:
+                if self.auto_attack.isChecked() and not self.server_dead:
                     self.combat_timer.start()
+                if self.auto_potion.isChecked():
+                    self.potion_timer.start()
                 if self.questless_farm_mode:
                     QTimer.singleShot(500, self.continue_quest_map_travel)
                 self.refresh_social_data()
@@ -2219,9 +2567,13 @@ class MainWindow(QMainWindow):
             if detected_death:
                 self.travel_status.setText("检测到角色阵亡，正在自动请求回到城镇…")
                 QTimer.singleShot(0, self.request_respawn)
-            self.update_nearby_players(packet.get("peers", []))
-            if isinstance(packet.get("peers"), list):
-                self.last_peers = packet["peers"]
+            peers = packet.get("peers")
+            if isinstance(peers, list):
+                self.merge_nearby_players(peers)
+            else:
+                self.expire_nearby_players()
+            self.update_nearby_players(self.last_peers)
+            self.minimap.update()
             self.update_live_telemetry()
         elif kind == "travel_result":
             self.move_timer.stop()
@@ -2232,6 +2584,7 @@ class MainWindow(QMainWindow):
             self.pending_portal = None
             self.route_points = []
             if packet.get("ok"):
+                self.auto_route_retry_count = 0
                 if destination is not None:
                     self.current_map = destination
                 self.world_x = packet.get("x", self.world_x)
@@ -2243,6 +2596,12 @@ class MainWindow(QMainWindow):
             else:
                 reason = packet.get("reason", "未知原因")
                 retry = packet.get("retryAfter")
+                position = packet.get("position")
+                if isinstance(position, dict) and int(position.get("map", self.current_map or 1)) == self.current_map:
+                    self.world_x = position.get("x", self.world_x)
+                    self.world_y = position.get("y", self.world_y)
+                    self.movement_revision = int(position.get("revision", self.movement_revision))
+                    self.position_estimated = False
                 self.travel_status.setText(f"入图被拒绝：{reason}" + (f"；{retry} 秒后可重试" if retry else ""))
             self.update_map_buttons()
             if packet.get("ok") and self.return_map_target is not None:
@@ -2250,6 +2609,8 @@ class MainWindow(QMainWindow):
             elif packet.get("ok") and (self.quest_map_target is not None or self.questless_farm_mode):
                 QTimer.singleShot(500, self.continue_quest_map_travel)
             elif not packet.get("ok"):
+                self.schedule_auto_travel_retry()
+            if not packet.get("ok") and not self.has_auto_travel_intent():
                 self.return_map_target = None
                 self.quest_map_target = None
                 self.quest_map_quest_id = None
@@ -2268,17 +2629,24 @@ class MainWindow(QMainWindow):
             encounter_id = str(hit.get("monster", ""))
             if encounter_id and self.player_id is not None:
                 try:
-                    if int(packet.get("attacker", -1)) == self.player_id and encounter_id in self.monsters:
-                        monster = self.monsters[encounter_id]
-                        if "health" in monster:
+                    if int(packet.get("attacker", -1)) == self.player_id:
+                        self.combat_stats["hits"] += 1
+                        try:
+                            self.combat_stats["damage"] += max(0, int(hit.get("damage", 0)))
+                        except (TypeError, ValueError):
+                            pass
+                        self.update_combat_stats()
+                        monster = self.monsters.get(encounter_id)
+                        if monster and "health" in monster:
                             monster["health"] = max(0, int(monster["health"]) - int(hit.get("damage", 0)))
                             self.refresh_monster_table()
                 except (TypeError, ValueError):
                     pass
             if hit.get("monster") == self.last_attacked_monster:
-                self.combat_status.setText(
+                self.set_combat_feedback(
                     f"命中 {hit['monster']}：伤害 {hit.get('damage', '?')}"
-                    + (" · 暴击" if hit.get("critical") else "")
+                    + (" · 暴击" if hit.get("critical") else ""),
+                    "critical" if hit.get("critical") else "hit",
                 )
             self.update_live_telemetry()
             self.refresh_profile_data()
@@ -2299,9 +2667,9 @@ class MainWindow(QMainWindow):
                 # Do not invent a death locally. Compact snapshots may not
                 # resend an unchanged living monster, so setting health=0
                 # here could hide it forever. Skip it temporarily instead.
-                self.combat_status.setText(
+                self.set_combat_feedback(
                     f"目标 {rejected_id[:8]} 已不被服务端接受（可能刚被击败或离开攻击范围）；"
-                    f"暂时跳过 15 秒。当前记录距离 {distance:.0f}。"
+                    f"暂时跳过 15 秒。当前记录距离 {distance:.0f}。", "error"
                 )
                 self.append_log(f"攻击目标诊断：invalid_target；id={rejected_id}；距离={distance:.1f}；"
                                 f"地图={self.current_map}；本地血量={monster.get('health', '?')}")
@@ -2312,7 +2680,7 @@ class MainWindow(QMainWindow):
                 self.attack_busy_until = max(self.attack_busy_until, time.monotonic() + 0.62)
                 self.combat_status.setText("服务端仍在攻击冷却；保留票据，稍后再试。")
             else:
-                self.combat_status.setText(f"攻击被拒绝：{code}")
+                self.set_combat_feedback(f"攻击被拒绝：{code}", "error")
             if isinstance(packet.get("nextAttack"), dict):
                 self.accept_attack_ticket(packet["nextAttack"])
         elif kind == "error" and packet.get("code") in ("movement_too_fast", "invalid_position", "combat_locked"):
@@ -2405,6 +2773,8 @@ class MainWindow(QMainWindow):
                 self.travel_status.setText("原地位置同步也被服务端拒绝；当前没有移动目标。请查看纠正诊断日志。")
             if can_retry and destination is not None:
                 QTimer.singleShot(500, lambda target=destination: self.travel_to(target, recovery=True))
+            elif destination is not None:
+                self.schedule_auto_travel_retry()
 
     def update_quests(self, quests: list) -> None:
         rows = [quest for quest in quests if isinstance(quest, dict)]
@@ -2587,6 +2957,30 @@ class MainWindow(QMainWindow):
         else:
             self.travel_status.setText(f"按当前任务前往 {MAP_NAMES[target]}，下一站 {MAP_NAMES[route[0]]}。")
         self.travel_to(route[0])
+
+    def has_auto_travel_intent(self) -> bool:
+        return (self.return_map_target is not None
+                or self.quest_map_target is not None
+                or (self.questless_farm_mode and self.questless_farm_target is not None))
+
+    def schedule_auto_travel_retry(self) -> None:
+        if not self.has_auto_travel_intent() or self.auto_route_retry_count >= 2:
+            if self.has_auto_travel_intent():
+                self.travel_status.setText(self.travel_status.text() + "；自动重规划已达上限，请手动选择地图或重新点一次")
+            return
+        self.auto_route_retry_count += 1
+        retry_number = self.auto_route_retry_count
+        self.travel_status.setText(self.travel_status.text() + f"；{2 * retry_number} 秒后重新规划（{retry_number}/2）")
+
+        def retry() -> None:
+            if self.pending_destination is not None or not self.world_ready:
+                return
+            if self.return_map_target is not None:
+                self.continue_return_map()
+            elif self.has_auto_travel_intent():
+                self.continue_quest_map_travel()
+
+        QTimer.singleShot(2000 * retry_number, retry)
 
     def accept_next_monster_quest(self) -> None:
         today = datetime.now().date()
@@ -2964,7 +3358,7 @@ class MainWindow(QMainWindow):
                 frame = sprite.copy(0, 0, min(sprite.width(), sprite.height()), sprite.height())
                 self.character_portrait.setText("")
                 self.character_portrait.setStyleSheet("background:transparent;border:0;")
-                self.character_portrait.setPixmap(frame.scaled(68, 92, Qt.AspectRatioMode.KeepAspectRatio,
+                self.character_portrait.setPixmap(frame.scaled(82, 108, Qt.AspectRatioMode.KeepAspectRatio,
                                                                Qt.TransformationMode.SmoothTransformation))
                 self.character_portrait.setToolTip(f"{class_display} · 游戏原始待机素材")
             else:
@@ -2988,6 +3382,14 @@ class MainWindow(QMainWindow):
                 self.health_bar.setFormat(f"{health}/{maximum}")
             except (TypeError, ValueError):
                 self.health_bar.setFormat("等待生命数据")
+        if hasattr(self, "experience_bar"):
+            try:
+                current_xp = max(0, int(experience))
+                needed_xp = max(1, int(experience_needed))
+                self.experience_bar.setValue(round(min(100, current_xp / needed_xp * 100)))
+                self.experience_bar.setFormat(f"{current_xp}/{needed_xp}")
+            except (TypeError, ValueError):
+                self.experience_bar.setFormat("等待经验数据")
             farming = self_state.get("farming", {})
             try:
                 stamina = float(farming["staminaPercent"])
@@ -3099,30 +3501,46 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "backpack_dialog"):
             self.backpack_dialog = QDialog(self)
             self.backpack_dialog.setWindowTitle("背包")
-            self.backpack_dialog.resize(640, 420)
+            self.backpack_dialog.resize(720, 500)
+            self.backpack_dialog.setMinimumSize(640, 440)
             layout = QVBoxLayout(self.backpack_dialog)
+            heading = QHBoxLayout()
             self.backpack_status = QLabel("等待数据")
-            layout.addWidget(self.backpack_status)
+            heading.addWidget(self.backpack_status, 1)
             refresh = QPushButton("刷新背包")
+            refresh.setObjectName("primaryButton")
+            refresh.setMinimumWidth(132)
+            refresh.setMinimumHeight(38)
             refresh.clicked.connect(lambda: self.refresh_profile_data(force=True))
-            layout.addWidget(refresh)
-            self.backpack_table = QTableWidget(0, 4)
-            self.backpack_table.setHorizontalHeaderLabels(["物品", "类型", "品质", "数量"])
+            heading.addWidget(refresh)
+            layout.addLayout(heading)
+            self.backpack_table = QTableWidget(0, 5)
+            self.backpack_table.setHorizontalHeaderLabels(["物品", "类型", "品质", "数量", "属性"])
             self.backpack_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.backpack_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.backpack_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            self.backpack_table.setToolTip("按住 Ctrl（macOS 上按 ⌘）可多选；只能比较同一部位的装备。")
             self.backpack_table.itemSelectionChanged.connect(self.update_backpack_action)
             self.backpack_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.backpack_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+            self.backpack_table.verticalHeader().setDefaultSectionSize(48)
+            self.backpack_table.horizontalHeader().setMinimumHeight(38)
             layout.addWidget(self.backpack_table)
             actions = QHBoxLayout()
             self.backpack_equip_button = QPushButton("装备所选")
             self.backpack_equip_button.setObjectName("primaryButton")
             self.backpack_equip_button.setEnabled(False)
             self.backpack_equip_button.clicked.connect(self.equip_backpack_selection)
+            self.backpack_compare_button = QPushButton("对比所选 (0)")
+            self.backpack_compare_button.setObjectName("quietButton")
+            self.backpack_compare_button.setEnabled(False)
+            self.backpack_compare_button.clicked.connect(self.compare_backpack_selection)
             self.backpack_sell_button = QPushButton("上架出售")
             self.backpack_sell_button.setObjectName("secondaryButton")
-            self.backpack_sell_button.setEnabled(False)
-            self.backpack_sell_button.setToolTip("当前客户端源码没有提供物品上架协议，接口确认前禁用。")
+            self.backpack_sell_button.setToolTip("当前游戏客户端没有可核实的装备上架接口；点击查看状态。")
+            self.backpack_sell_button.clicked.connect(self.explain_item_listing_status)
             actions.addWidget(self.backpack_equip_button)
+            actions.addWidget(self.backpack_compare_button)
             actions.addWidget(self.backpack_sell_button)
             layout.addLayout(actions)
         self.update_backpack()
@@ -3183,22 +3601,33 @@ class MainWindow(QMainWindow):
             equipped = bool(item.get("equipped", False))
             values = (name, SLOT_NAMES_ZH.get(slot.upper(), slot),
                       QUALITY_NAMES_ZH.get(quality.upper(), quality), level,
+                      " · ".join(equipment_attribute_lines(item)),
                       "已装备" if equipped else "背包")
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setForeground(QColor(quality_color(quality)))
                 if col == 0:
                     cell.setData(Qt.ItemDataRole.UserRole, item)
+                    cell.setToolTip(json.dumps(item, ensure_ascii=False, indent=2))
                     item_code = str(item.get("itemCode", "")).lower()
                     icon_stem = next((stem for stem in ("sword", "helmet", "armor", "boots", "shoes", "ring", "amulet")
                                       if stem in item_code), "")
+                    if not icon_stem and "spear" in item_code:
+                        icon_stem = "sword"  # The extracted game pack has no separate spear icon.
                     if icon_stem == "shoes":
                         icon_stem = "boots"
                     try:
-                        level_no = int(item.get("equipmentLevel", 1) or 1)
+                        level_source = item.get("equipmentLevel")
+                        if level_source is None:
+                            match = re.search(r"P([1-6])$", item_code.upper())
+                            level_source = match.group(1) if match else 1
+                        level_no = int(level_source or 1)
                     except (TypeError, ValueError):
                         level_no = 1
-                    icon_path = Path(__file__).with_name("assets") / f"{icon_stem}_p{level_no}.webp" if icon_stem else None
+                    # The game bundle exposes tier-one/tier-two equipment icons;
+                    # retain a source-matched icon for higher-tier items too.
+                    icon_level = min(2, max(1, level_no))
+                    icon_path = Path(__file__).with_name("assets") / f"{icon_stem}_p{icon_level}.webp" if icon_stem else None
                     if icon_path and icon_path.is_file():
                         cell.setIcon(QIcon(str(icon_path)))
                 self.social_inventory_table.setItem(row, col, cell)
@@ -3213,7 +3642,29 @@ class MainWindow(QMainWindow):
         item_cell = self.social_inventory_table.item(row, 0) if row >= 0 else None
         item = item_cell.data(Qt.ItemDataRole.UserRole) if item_cell else None
         self.equip_item_button.setEnabled(isinstance(item, dict))
-        self.equip_item_button.setText("卸下所选" if isinstance(item, dict) and item.get("equipped") else "装备所选")
+        self.equip_item_button.setText(
+            ("卸下 " if item.get("equipped") else "装备 ") + localized_item_name(item)
+            if isinstance(item, dict) else "选择物品后装备"
+        )
+        if isinstance(item, dict):
+            quality = str(item.get("qualityCode", "L1"))
+            self.selected_item_name.setText(localized_item_name(item))
+            self.selected_item_name.setStyleSheet(f"color: {quality_color(quality)}; font-weight: 700;")
+            slot = SLOT_NAMES_ZH.get(str(item.get("slotType", "")).upper(), str(item.get("slotType", "物品")))
+            level = item.get("equipmentLevel", "—")
+            self.selected_item_detail.setText(
+                f"{slot}  ·  {QUALITY_NAMES_ZH.get(quality.upper(), quality)}  ·  等级 {level}  ·  "
+                f"{'已装备' if item.get('equipped') else '背包'}"
+            )
+            self.selected_item_attributes.setText("属性：" + "  ·  ".join(equipment_attribute_lines(item)))
+            icon = item_cell.icon() if item_cell else QIcon()
+            self.selected_item_icon.setPixmap(icon.pixmap(32, 32) if not icon.isNull() else QPixmap())
+        else:
+            self.selected_item_name.setText("未选择物品")
+            self.selected_item_name.setStyleSheet("")
+            self.selected_item_detail.setText("点击背包中的一行查看物品详情，再执行装备操作。")
+            self.selected_item_attributes.setText("属性：选择装备查看")
+            self.selected_item_icon.clear()
 
     def equip_selected_item(self) -> None:
         row = self.social_inventory_table.currentRow()
@@ -3276,6 +3727,46 @@ class MainWindow(QMainWindow):
             for col, value in enumerate((name, mode_names.get(mode, "未知"), f"{health}/{maximum}")):
                 self.enemy_table.setItem(row, col, QTableWidgetItem(value))
 
+    def merge_nearby_players(self, peers: list) -> None:
+        """Keep nearby players visible across sparse/partial server snapshots."""
+        now = time.monotonic()
+        for index, raw_peer in enumerate(peers):
+            if not isinstance(raw_peer, dict):
+                continue
+            peer = dict(raw_peer)
+            peer_id = peer.get("id", peer.get("playerId"))
+            if peer_id is not None:
+                key = f"id:{peer_id}"
+            else:
+                name = str(peer.get("playerName", peer.get("name", ""))).strip()
+                position = peer.get("position") if isinstance(peer.get("position"), dict) else peer
+                key = f"name:{name}" if name else f"position:{position.get('x')}:{position.get('y')}:{index}"
+
+            old = self.peer_cache.get(key, {})
+            merged = dict(old)
+            merged.update(peer)
+            old_position = old.get("position") if isinstance(old.get("position"), dict) else {}
+            new_position = peer.get("position") if isinstance(peer.get("position"), dict) else None
+            if new_position is not None:
+                merged["position"] = {**old_position, **new_position}
+            if ("mapId" not in merged and "map" not in merged
+                    and not (isinstance(merged.get("position"), dict)
+                             and ("mapId" in merged["position"] or "map" in merged["position"]))
+                    and self.current_map is not None):
+                merged["mapId"] = self.current_map
+            self.peer_cache[key] = merged
+            self.peer_last_seen[key] = now
+        self.expire_nearby_players(now)
+
+    def expire_nearby_players(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        stale = [key for key, seen_at in self.peer_last_seen.items()
+                 if now - seen_at > NEARBY_PLAYER_TTL_SECONDS]
+        for key in stale:
+            self.peer_last_seen.pop(key, None)
+            self.peer_cache.pop(key, None)
+        self.last_peers = list(self.peer_cache.values())
+
     def append_social_chat(self, messages: object, channel: str = "世界") -> None:
         if not hasattr(self, "social_chat_log"):
             return
@@ -3324,14 +3815,27 @@ class MainWindow(QMainWindow):
         for row, values in enumerate(rows):
             quality = values[4]
             color = QColor(quality_color(quality))
-            for col, value in enumerate(values[:4]):
+            item_record = values[5]
+            properties = " · ".join(equipment_attribute_lines(item_record)) if isinstance(item_record, dict) else "—"
+            shown = (*values[:4], properties)
+            for col, value in enumerate(shown):
                 cell = QTableWidgetItem(value)
                 if col in (0, 2) and quality:
                     cell.setForeground(color)
-                if col == 0 and isinstance(values[5], dict):
-                    cell.setData(Qt.ItemDataRole.UserRole, values[5])
+                if col == 0 and isinstance(item_record, dict):
+                    cell.setData(Qt.ItemDataRole.UserRole, item_record)
+                    cell.setToolTip(json.dumps(item_record, ensure_ascii=False, indent=2))
+                    icon = equipment_icon(item_record)
+                    if not icon.isNull():
+                        cell.setIcon(icon)
+                        cell.setSizeHint(QSize(0, 48))
+                elif col == 0:
+                    cell.setSizeHint(QSize(0, 48))
                 self.backpack_table.setItem(row, col, cell)
-        self.backpack_status.setText(f"背包 {len(rows)} 类物品 · 已穿戴装备见角色面板" if "items" in self.api_equipment else "等待服务端背包数据…")
+        self.backpack_status.setText(
+            f"背包 {len(rows)} 类物品 · 按住 Ctrl/⌘ 多选同部位装备可比较" if "items" in self.api_equipment
+            else "等待服务端背包数据…"
+        )
         self.update_backpack_action()
 
     def update_backpack_action(self) -> None:
@@ -3341,6 +3845,188 @@ class MainWindow(QMainWindow):
         cell = self.backpack_table.item(row, 0) if row >= 0 else None
         item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         self.backpack_equip_button.setEnabled(isinstance(item, dict))
+        selected_rows = sorted({index.row() for index in self.backpack_table.selectionModel().selectedRows()})
+        selected_items = []
+        for selected_row in selected_rows:
+            selected_cell = self.backpack_table.item(selected_row, 0)
+            selected_item = selected_cell.data(Qt.ItemDataRole.UserRole) if selected_cell else None
+            if isinstance(selected_item, dict) and selected_item.get("slotType"):
+                selected_items.append(selected_item)
+        slots = {str(selected.get("slotType", "")).upper() for selected in selected_items}
+        equipped_match = self.equipped_item_for_slot(next(iter(slots))) if len(slots) == 1 else None
+        can_compare = (len(selected_items) == 1 and equipped_match is not None) or (len(selected_items) >= 2 and len(slots) == 1)
+        if hasattr(self, "backpack_compare_button"):
+            self.backpack_compare_button.setEnabled(can_compare)
+            self.backpack_compare_button.setText("对比已装备" if len(selected_items) == 1 and can_compare
+                                                else f"对比所选 ({len(selected_items)})")
+            self.backpack_compare_button.setToolTip("将所选装备与当前已装备的同部位装备对比。" if len(selected_items) == 1 and can_compare else
+                                                    "选择至少两件同部位装备进行属性对比。" if can_compare else
+                                                    "请选择同部位装备；单选时需要角色当前已装备该部位。")
+
+    def equipped_item_for_slot(self, slot: str) -> dict | None:
+        items = self.api_equipment.get("items", [])
+        if not isinstance(items, list):
+            return None
+        slot = str(slot or "").upper()
+        return next((item for item in items if isinstance(item, dict) and item.get("equipped")
+                     and str(item.get("slotType", "")).upper() == slot), None)
+
+    def explain_item_listing_status(self) -> None:
+        message = (
+            "当前客户端已确认的装备接口只有读取、穿戴、卸下和丢弃；未发现可核实的装备上架接口。\n\n"
+            "为避免误请求或误操作，这里不会伪造上架成功。上架功能需要服务端提供正式的商品创建/挂牌接口和参数后才能接通。"
+        )
+        if hasattr(self, "backpack_status") and self.sender() is getattr(self, "backpack_sell_button", None):
+            self.backpack_status.setText("暂不可上架：游戏服务端接口尚未核实。")
+        elif hasattr(self, "inventory_action_status"):
+            self.inventory_action_status.setText("暂不可上架：游戏服务端接口尚未核实。")
+        QMessageBox.information(self, "上架出售", message)
+
+    def compare_backpack_selection(self) -> None:
+        selected_rows = sorted({index.row() for index in self.backpack_table.selectionModel().selectedRows()})
+        items = []
+        for row in selected_rows:
+            cell = self.backpack_table.item(row, 0)
+            item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+            if isinstance(item, dict) and item.get("slotType"):
+                items.append(item)
+        slots = {str(item.get("slotType", "")).upper() for item in items}
+        if not items or len(slots) != 1:
+            self.backpack_status.setText("请选择同一部位的装备后再对比。")
+            return
+        if len(items) == 1:
+            equipped = self.equipped_item_for_slot(next(iter(slots)))
+            if equipped is None:
+                self.backpack_status.setText("角色当前没有已装备的同部位装备，无法进行单件对比。")
+                return
+            items.insert(0, equipped)
+        self.open_equipment_comparison(items)
+
+    def open_equipment_comparison(self, items: list[dict]) -> None:
+        dialog = QDialog(self.backpack_dialog if hasattr(self, "backpack_dialog") else self)
+        dialog.setWindowTitle("装备属性对比")
+        dialog.resize(max(620, 240 * len(items)), 440)
+        layout = QVBoxLayout(dialog)
+        slot = SLOT_NAMES_ZH.get(str(items[0].get("slotType", "")).upper(), "装备")
+        equipped_ids = {str(item.get("playerItemId")) for item in items
+                        if item.get("equipped") and item.get("playerItemId") is not None}
+        heading = QLabel(f"{slot}属性对比 · {len(items)} 件")
+        heading.setObjectName("sectionTitle")
+        layout.addWidget(heading)
+        stat_keys = [
+            ("攻击", "attack", "ATTACK"), ("防御", "defense", "DEFENSE"),
+            ("生命", "maxHealth", "HEALTH"), ("生命恢复", "healthRegen", "HEALTH_REGEN"),
+            ("攻击速度", "attackSpeedPercent", "ATTACK_SPEED_PERCENT"),
+            ("移动速度", "moveSpeedPercent", "MOVE_SPEED_PERCENT"),
+            ("暴击率", "criticalChancePercent", "CRITICAL_CHANCE_PERCENT"), ("幸运", "luck", "LUCK"),
+        ]
+        known_codes = {code for _, _, code in stat_keys}
+        code_aliases = {"ATTACK_SPEED": "ATTACK_SPEED_PERCENT", "MOVE_SPEED": "MOVE_SPEED_PERCENT",
+                        "CRITICAL": "CRITICAL_CHANCE_PERCENT", "CRITICAL_CHANCE": "CRITICAL_CHANCE_PERCENT",
+                        "MAX_HEALTH": "HEALTH"}
+        extra_codes = []
+        for item in items:
+            attributes = item.get("attributes", [])
+            if not isinstance(attributes, list):
+                continue
+            for attr in attributes:
+                if not isinstance(attr, dict):
+                    continue
+                raw_code = str(attr.get("code", "")).upper()
+                code = code_aliases.get(raw_code, raw_code)
+                if code and code not in known_codes:
+                    known_codes.add(code)
+                    extra_codes.append((str(attr.get("displayNameZh") or _ITEM_ATTRIBUTE_NAMES_ZH.get(raw_code)
+                                           or attr.get("displayName") or raw_code), None, code))
+        stat_keys.extend(extra_codes)
+        table = QTableWidget(len(stat_keys) + 2, len(items) + 1)
+        header_labels = []
+        for item in items:
+            label = localized_item_name(item)
+            if item.get("equipped"):
+                label += " · 已装备"
+            header_labels.append(label)
+        table.setHorizontalHeaderLabels(["属性", *header_labels])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col in range(1, len(items) + 1):
+            table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+
+        def stat_map(item: dict) -> dict[str, str]:
+            result: dict[str, str] = {}
+            attributes = item.get("attributes", [])
+            if isinstance(attributes, list):
+                for attr in attributes:
+                    if isinstance(attr, dict):
+                        raw_code = str(attr.get("code", "")).upper()
+                        code = code_aliases.get(raw_code, raw_code)
+                        result[code] = equipment_attribute_lines({"attributes": [attr]})[0]
+            for _, key, code in stat_keys:
+                if code not in result and item.get(key) not in (None, 0, "0", ""):
+                    result[code] = " ".join(equipment_attribute_lines({key: item[key]}))
+            return result
+
+        values_by_item = [stat_map(item) for item in items]
+        row_labels = ["等级", "品质", *[label for label, _, _ in stat_keys]]
+        row_values: list[list[str]] = []
+        for row, label in enumerate(row_labels):
+            table.setItem(row, 0, QTableWidgetItem(label))
+            current_row = []
+            for col, item in enumerate(items, start=1):
+                if row == 0:
+                    value = str(item.get("equipmentLevel", "—"))
+                elif row == 1:
+                    quality = str(item.get("qualityCode", "L1"))
+                    value = QUALITY_NAMES_ZH.get(quality.upper(), quality)
+                else:
+                    code = stat_keys[row - 2][2]
+                    value = values_by_item[col - 1].get(code, "—")
+                cell = QTableWidgetItem(value)
+                cell.setForeground(QColor(quality_color(item.get("qualityCode", "L1"))))
+                table.setItem(row, col, cell)
+                current_row.append(value)
+            row_values.append(current_row)
+        for row, values in enumerate(row_values):
+            if len(set(values)) > 1:
+                for col, value in enumerate(values, start=1):
+                    cell = table.item(row, col)
+                    cell.setBackground(QColor("#35472f" if str(items[col - 1].get("playerItemId")) in equipped_ids else "#254e43"))
+                    font = cell.font()
+                    font.setBold(True)
+                    cell.setFont(font)
+        for col, item in enumerate(items, start=1):
+            if item.get("equipped"):
+                table.horizontalHeaderItem(col).setForeground(QColor("#a9d38f"))
+                table.horizontalHeaderItem(col).setToolTip("角色当前穿戴的装备")
+        layout.addWidget(table, 1)
+        help_text = QLabel("绿色高亮表示该项属性与对比装备不同；“已装备”标记为角色当前穿戴物。选择其他装备后可直接穿戴。")
+        help_text.setObjectName("subtitle")
+        layout.addWidget(help_text)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        for item in items:
+            equipped = bool(item.get("equipped"))
+            equip_button = QPushButton(f"{'当前已装备' if equipped else '装备「' + localized_item_name(item) + '」'}")
+            equip_button.setObjectName("quietButton" if equipped else "primaryButton")
+            equip_button.setEnabled(not equipped and item.get("playerItemId") is not None)
+            equip_button.clicked.connect(lambda _checked=False, selected=item: self.equip_item_from_comparison(selected, dialog))
+            buttons.addWidget(equip_button)
+        close_button = QPushButton("关闭")
+        close_button.setObjectName("secondaryButton")
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def equip_item_from_comparison(self, item: dict, dialog: QDialog) -> None:
+        player_item_id = item.get("playerItemId")
+        if player_item_id is None:
+            return
+        self.request_social_api("equip", "/equipment/equip", "POST", {"playerItemId": player_item_id})
+        if hasattr(self, "backpack_status"):
+            self.backpack_status.setText(f"正在装备 {localized_item_name(item)}，等待服务端确认…")
+        dialog.accept()
 
     def equip_backpack_selection(self) -> None:
         row = self.backpack_table.currentRow()
@@ -3415,7 +4101,9 @@ class MainWindow(QMainWindow):
             distance = self.monster_distance(monster)
             rank = str(monster.get("monsterRank", "")).upper()
             rank_label = {"NORMAL": "普通", "ELITE": "精英", "BOSS": "首领"}.get(rank, "未知")
-            values = [encounter_id, localized_monster_name(monster), rank_label,
+            level = next((monster.get(key) for key in ("level", "monsterLevel", "requiredLevel", "lv")
+                          if monster.get(key) is not None), "—")
+            values = [encounter_id, localized_monster_name(monster), str(level), rank_label,
                       f"{hp}/{max_hp}" if max_hp is not None else str(hp),
                       f"({x}, {y})", f"{distance:.0f}" if math.isfinite(distance) else "—"]
             for col, value in enumerate(values):
@@ -3450,9 +4138,61 @@ class MainWindow(QMainWindow):
     def update_attack_button(self) -> None:
         if not hasattr(self, "attack_button"):
             return
+        encounter_id = self.selected_monster_id()
+        monster = self.monsters.get(encounter_id) if encounter_id else None
         self.attack_button.setEnabled(self.ws is not None and self.world_ready
                                       and self.pending_destination is None
-                                      and self.selected_monster_id() is not None)
+                                      and monster is not None
+                                      and self.monster_matches_level_range(monster))
+
+    @staticmethod
+    def monster_level(monster: dict) -> int | None:
+        for key in ("level", "monsterLevel", "requiredLevel", "lv"):
+            value = monster.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                return int(float(value))
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return None
+
+    def monster_matches_level_range(self, monster: dict) -> bool:
+        if not self.monster_level_limited.isChecked():
+            return True
+        level = self.monster_level(monster)
+        return (level is not None
+                and self.monster_level_min.value() <= level <= self.monster_level_max.value())
+
+    def on_monster_level_filter_changed(self, enabled: bool) -> None:
+        self.monster_level_min.setEnabled(enabled)
+        self.monster_level_max.setEnabled(enabled)
+        self.settings.setValue("monsterLevelLimited", enabled)
+        self._discard_out_of_range_chase()
+        self.update_attack_button()
+        if self.auto_attack.isChecked():
+            self.combat_status.setText(
+                f"怪物等级限制已开启：{self.monster_level_min.value()}–{self.monster_level_max.value()} 级。"
+                if enabled else "怪物等级限制已关闭：可攻击所有等级。")
+
+    def on_monster_level_bound_changed(self, *_args) -> None:
+        if self.monster_level_min.value() > self.monster_level_max.value():
+            changed = self.sender()
+            if changed is self.monster_level_min:
+                self.monster_level_max.setValue(self.monster_level_min.value())
+            else:
+                self.monster_level_min.setValue(self.monster_level_max.value())
+        self.settings.setValue("monsterLevelMin", self.monster_level_min.value())
+        self.settings.setValue("monsterLevelMax", self.monster_level_max.value())
+        self._discard_out_of_range_chase()
+        self.update_attack_button()
+
+    def _discard_out_of_range_chase(self) -> None:
+        if self.chase_target is None:
+            return
+        target = self.monsters.get(self.chase_target)
+        if target is None or not self.monster_matches_level_range(target):
+            self.stop_chase()
 
     def attack_selected_monster(self) -> None:
         encounter_id = self.selected_monster_id()
@@ -3461,6 +4201,9 @@ class MainWindow(QMainWindow):
 
     def attack_monster(self, encounter_id: str) -> bool:
         monster = self.monsters.get(encounter_id)
+        if monster is not None and not self.monster_matches_level_range(monster):
+            self.combat_status.setText("该怪物不在设定的等级范围内，已跳过。")
+            return False
         if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
             self.combat_status.setText("任务有限模式：当前没有未完成的怪物任务，不会攻击。")
             return False
@@ -3495,7 +4238,10 @@ class MainWindow(QMainWindow):
         impact_delay, animation_duration, speed_multiplier = self.attack_timing(critical)
         self.attack_busy_until = time.monotonic() + max(0.62 / speed_multiplier, animation_duration) + 0.06
         self.last_attacked_monster = encounter_id
-        self.combat_status.setText(f"攻击动画进行中：{encounter_id[:8]} · 命中帧约 {impact_delay} ms · 票据 {ticket[:8]}…")
+        self.set_combat_feedback(
+            f"攻击动画进行中：{encounter_id[:8]} · 命中帧约 {impact_delay} ms · 票据 {ticket[:8]}…",
+            "attack", 1200,
+        )
         generation = self.combat_generation
         QTimer.singleShot(impact_delay, lambda: self.send_monster_attack(encounter_id, ticket, generation))
         return True
@@ -3524,6 +4270,7 @@ class MainWindow(QMainWindow):
         monster = self.monsters.get(encounter_id)
         if (monster is None or int(monster.get("health", 0)) <= 0
                 or int(monster.get("mapId", self.current_map or -1)) != self.current_map
+                or not self.monster_matches_level_range(monster)
                 or self.monster_distance(monster) > 60):
             self.invalid_target_until[encounter_id] = time.monotonic() + 3.0
             self.used_attack_tickets.discard(ticket)
@@ -3580,6 +4327,7 @@ class MainWindow(QMainWindow):
             self.combat_status.setText("只打精英怪：等待服务端标记为 ELITE 的怪物。" if enabled
                                        else "自动战斗：追击附近怪物。")
 
+
     def auto_attack_tick(self) -> None:
         if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
             self.combat_timer.stop()
@@ -3597,6 +4345,7 @@ class MainWindow(QMainWindow):
                       if int(monster.get("mapId", -1)) == self.current_map
                       and int(monster.get("health", 0)) > 0
                       and self.monster_matches_active_quest(monster)
+                      and self.monster_matches_level_range(monster)
                       and time.monotonic() >= self.invalid_target_until.get(encounter_id, 0.0)
                       and (not self.elite_only.isChecked() or
                            str(monster.get("monsterRank", "")).upper() == "ELITE")]
@@ -3622,6 +4371,49 @@ class MainWindow(QMainWindow):
             distance, encounter_id = min(candidates)
             self.start_chase(encounter_id)
 
+    def on_auto_potion_changed(self, enabled: bool) -> None:
+        if not enabled:
+            self.auto_potion_pending = False
+            self.potion_timer.stop()
+        elif self.world_ready and self.ws is not None:
+            self.potion_timer.start()
+        if hasattr(self, "combat_status"):
+            self.combat_status.setText("自动药水已开启：生命低于 50% 且冷却结束时使用。" if enabled
+                                       else "自动药水已关闭；不会自动消耗生命药水。")
+
+    def try_auto_use_potion(self) -> None:
+        if (not hasattr(self, "auto_potion") or not self.auto_potion.isChecked()
+                or not self.world_ready or self.ws is None or self.server_dead
+                or self.auto_potion_pending):
+            return
+        state = self.last_self_state if isinstance(self.last_self_state, dict) else {}
+        try:
+            health = float(state.get("health", 0))
+            maximum = float(state.get("maxHealth", 0))
+            quantity = int(state.get("healthPotions", 0))
+            cooldown = int(state.get("potionCooldownMs", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if maximum <= 0 or health / maximum > 0.5 or quantity <= 0 or cooldown > 0:
+            return
+        try:
+            self.send_game_packet({"action": "useHealthPotion"})
+            self.auto_potion_pending = True
+            self.combat_status.setText(f"生命 {health:.0f}/{maximum:.0f}；已请求使用生命药水。")
+            QTimer.singleShot(2500, self.release_auto_potion_request)
+        except Exception as exc:
+            self.combat_status.setText(f"药水请求发送失败：{type(exc).__name__}: {exc}")
+
+    def release_auto_potion_request(self) -> None:
+        self.auto_potion_pending = False
+
+    def update_combat_stats(self) -> None:
+        labels = getattr(self, "combat_stat_labels", {})
+        stats = getattr(self, "combat_stats", {})
+        titles = {"kills": "击败", "damage": "伤害", "hits": "命中", "potions": "药水"}
+        for key, label in labels.items():
+            label.setText(f"{titles[key]} {int(stats.get(key, 0))}")
+
     def start_patrol(self) -> None:
         """Search the current map while waiting for server-reported spawns."""
         if (self.current_map not in MAP_NAMES or self.world_x is None or self.world_y is None
@@ -3645,7 +4437,7 @@ class MainWindow(QMainWindow):
             self.patrol_direction_index += 1
             if self.patrol_direction_index == len(directions):
                 self.patrol_direction_index = 0
-                if self.patrol_ring >= 960:
+                if self.patrol_ring >= 3200:
                     self.patrol_ring = 320.0
                     self.patrol_anchor = start
                 else:
@@ -3666,7 +4458,8 @@ class MainWindow(QMainWindow):
                 self.patrol_route = list(path)
                 self.patrol_last_at = time.monotonic()
                 self.patrol_timer.start()
-                note = ("已验证路线" if self.current_map in (1, 2) else "小范围搜索路线")
+                note = ("已验证路线，逐圈扩大至 3200 单位" if self.current_map in (1, 2)
+                        else "逐圈扩大搜索路线")
                 self.combat_status.setText(f"当前暂未发现怪物，正在沿{note}搜索；发现目标后会立即追击。")
                 self.append_log(f"当前地图暂无可攻击怪物，开始搜索（地图 {self.current_map}，{note}）。")
                 return
@@ -3729,7 +4522,8 @@ class MainWindow(QMainWindow):
         if not recovery:
             self.movement_corrections = 0
         monster = self.monsters.get(encounter_id)
-        if not monster or self.world_x is None or self.world_y is None:
+        if (not monster or not self.monster_matches_level_range(monster)
+                or self.world_x is None or self.world_y is None):
             return
         start = float(self.world_x), float(self.world_y)
         goal = float(monster["x"]), float(monster["y"])
@@ -3901,6 +4695,8 @@ class MainWindow(QMainWindow):
             return
         if not recovery:
             self.movement_corrections = 0
+            if not self.has_auto_travel_intent():
+                self.auto_route_retry_count = 0
         if self.chase_target is not None:
             self.stop_chase()
         if self.world_x is None or self.world_y is None:
@@ -3943,8 +4739,16 @@ class MainWindow(QMainWindow):
         if not self.route_points:
             self.move_timer.stop()
             attempt = self.travel_attempt
-            self.travel_status.setText("已到入口预计坐标，等待服务端移动校验后切图…")
-            QTimer.singleShot(2500, lambda: self.send_travel(self.pending_destination, attempt)
+            self.travel_status.setText("已到入口坐标，补发位置同步并等待服务端确认…")
+            try:
+                self.send_game_packet({"action": "sync", "movementRevision": self.movement_revision,
+                                       "map": self.current_map, "x": round(float(self.world_x), 2),
+                                       "y": round(float(self.world_y), 2), "animation": "idle",
+                                       "attackCritical": False, "flip": False}, log=False)
+            except Exception as exc:
+                self.travel_status.setText(f"入口位置确认帧发送失败：{type(exc).__name__}: {exc}")
+                return
+            QTimer.singleShot(900, lambda: self.send_travel(self.pending_destination, attempt)
                               if self.pending_destination is not None else None)
             return
         target_x, target_y = self.route_points[0]
@@ -3966,10 +4770,10 @@ class MainWindow(QMainWindow):
             return
         self.world_x, self.world_y = next_x, next_y
         self.position_estimated = True
-        self.world_status.setText(
-            f"当前：{MAP_NAMES.get(self.current_map, str(self.current_map))}    预计坐标：({next_x}, {next_y})"
-            f"    距入口约 {round(remaining - step)}"
-        )
+        now = time.monotonic()
+        if now - self.last_world_status_render_at >= 2.0:
+            self.world_status.setText(f"正在前往入口 · 距离约 {round(remaining - step)}")
+            self.last_world_status_render_at = now
 
     def cancel_travel(self) -> None:
         self.return_map_target = None
@@ -4052,8 +4856,9 @@ class MainWindow(QMainWindow):
             self.pending_destination = None
             self.pending_portal = None
             self.route_points = []
-            self.travel_status.setText("6 秒内没有收到 travel_result，请查看连接日志。")
+            self.travel_status.setText("6 秒内没有收到 travel_result；已释放进图状态，防止一直卡住。")
             self.update_map_buttons()
+            self.schedule_auto_travel_retry()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.minimap_timer.stop()
