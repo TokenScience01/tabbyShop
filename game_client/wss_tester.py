@@ -22,7 +22,7 @@ from town_navigation import find_map_path, find_town_path
 from minimap import TacticalMap
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -240,9 +240,9 @@ SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES"
 QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀", "RARE": "稀有",
                     "EPIC": "史诗", "LEGENDARY": "传说",
                     "L1": "普通", "L2": "稀有", "L3": "史诗", "L4": "传说"}
-QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#63adff", "L3": "#c487ff", "L4": "#f2c45f",
-                  "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#63adff",
-                  "RARE": "#63adff", "EPIC": "#c487ff", "LEGENDARY": "#f2c45f"}
+QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#69b3ff", "L3": "#c994ff", "L4": "#ffcf72",
+                  "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#69b3ff",
+                  "RARE": "#69b3ff", "EPIC": "#c994ff", "LEGENDARY": "#ffcf72"}
 
 
 def quality_color(value: object) -> str:
@@ -255,6 +255,8 @@ ITEM_NAMES_ZH = {str(row.get("itemCode", "")).upper(): row.get("nameZh", "")
                  for row in _item_name_rows if isinstance(row, dict)}
 ITEM_NAMES_ZH.update({str(row.get("nameEn", "")).casefold(): row.get("nameZh", "")
                       for row in _item_name_rows if isinstance(row, dict)})
+# API-only transitional code, missing from the packaged equipment-name table.
+ITEM_NAMES_ZH.setdefault("STARTER_SHOES", "新手鞋")
 
 
 def localized_item_name(item: dict) -> str:
@@ -357,6 +359,9 @@ class MainWindow(QMainWindow):
         self.reconnect_timer = QTimer(self)
         self.reconnect_timer.setSingleShot(True)
         self.reconnect_timer.timeout.connect(self.retry_connection)
+        self.telemetry_timer = QTimer(self)
+        self.telemetry_timer.setInterval(300)
+        self.telemetry_timer.timeout.connect(self.update_live_telemetry)
 
         root = QWidget()
         root.setObjectName("root")
@@ -607,6 +612,7 @@ class MainWindow(QMainWindow):
         self.profile_refresh_inflight = False
         self.profile_refreshed_at = 0.0
         self.profile_refresh_queued = False
+        self.balance_refreshed_at = 0.0
 
         travel_card = QFrame()
         travel_card.setObjectName("card")
@@ -864,7 +870,7 @@ class MainWindow(QMainWindow):
         self.redesign_dashboard(root)
 
     def redesign_dashboard(self, old_root) -> None:
-        """Present existing controls in a compact two-column workspace."""
+        """Arrange live game controls in a compact, three-zone workspace."""
         root = QWidget()
         root.setObjectName("root")
         layout = QVBoxLayout(root)
@@ -888,17 +894,26 @@ class MainWindow(QMainWindow):
             box.addWidget(label)
             return frame, box
 
-        header = QHBoxLayout()
-        brand = QLabel("TABBY  <span style='color:#9da794;font-weight:400'> / 探索控制台</span>")
+        header_widget = QWidget(root)
+        self.dashboard_header = header_widget
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 0, 0, 0)
+        brand = QLabel("探索控制台")
         brand.setObjectName("title")
+        self.dashboard_title = brand
         header.addWidget(brand)
         header.addStretch()
         self.account_toggle = QPushButton("账号连接")
         self.account_toggle.setObjectName("quietButton")
         self.account_toggle.setCheckable(True)
         header.addWidget(self.account_toggle)
+        self.connection_dot = QLabel()
+        self.connection_dot.setFixedSize(10, 10)
+        self.connection_dot.setStyleSheet("background:#dc5b57;border-radius:5px;")
+        self.connection_dot.setToolTip("连接状态与网络延迟")
+        header.addWidget(self.connection_dot)
         place(header, self.status)
-        layout.addLayout(header)
+        layout.addWidget(header_widget)
         connection = QFrame(root)
         connection.setObjectName("card")
         connect_row = QHBoxLayout(connection)
@@ -933,37 +948,64 @@ class MainWindow(QMainWindow):
         self.character_portrait = portrait
         portrait.setFixedSize(68, 92)
         portrait.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pixmap = QPixmap(str(Path(__file__).with_name("assets") / "portrait.webp"))
-        portrait.setPixmap(pixmap.scaled(60, 60, Qt.AspectRatioMode.KeepAspectRatio,
-                                       Qt.TransformationMode.SmoothTransformation))
+        portrait.setText("连接后\n加载角色")
+        portrait.setStyleSheet("background:#292E2D;border:1px solid #414846;border-radius:10px;color:#AAB4B1;font-size:10px;")
         character_row.addWidget(portrait)
         self.character_status.setParent(root)
         self.character_status.hide()
         facts = QGridLayout()
-        facts.setHorizontalSpacing(12)
-        facts.setVerticalSpacing(5)
+        facts.setHorizontalSpacing(10)
+        facts.setVerticalSpacing(4)
+        facts.setColumnMinimumWidth(0, 48)
+        facts.setColumnMinimumWidth(2, 48)
+        facts.setColumnStretch(1, 1)
+        facts.setColumnStretch(3, 1)
         self.character_facts = {}
-        for index, key in enumerate(("角色", "职业", "等级", "状态", "生命", "经验", "攻击", "防御", "金币", "移速加成")):
+        fact_keys = ("角色", "职业", "等级", "状态", "经验", "攻击", "防御", "金币", "移速加成")
+        for index, key in enumerate(fact_keys):
             label = QLabel(key)
             label.setObjectName("subtitle")
             value = QLabel("—")
             value.setTextFormat(Qt.TextFormat.PlainText)
+            value.setMinimumWidth(0)
+            value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             self.character_facts[key] = value
             row, col = index // 2, (index % 2) * 2
             facts.addWidget(label, row, col)
             facts.addWidget(value, row, col + 1)
         self.health_bar = QProgressBar()
         self.fatigue_bar = QProgressBar()
-        for row, (title, bar) in enumerate((("生命", self.health_bar), ("疲劳余量", self.fatigue_bar)), 5):
+        character_bars = QVBoxLayout()
+        character_bars.setSpacing(4)
+        for title, bar in (("生命", self.health_bar), ("疲劳余量", self.fatigue_bar)):
             bar.setRange(0, 100)
             bar.setValue(0)
             bar.setFormat("等待数据")
             bar.setFixedHeight(18)
-            bar.setStyleSheet("QProgressBar {background:#171c16;border:1px solid #46523f;border-radius:4px;text-align:center;color:#edf0e6;font-size:11px;} QProgressBar::chunk {background:" + ("#809e73" if row == 5 else "#b59e6e") + ";border-radius:3px;}")
-            facts.addWidget(QLabel(title), row, 0)
-            facts.addWidget(bar, row, 1, 1, 3)
+            bar.setStyleSheet("QProgressBar {background:#191D1E;border:1px solid #444C4A;border-radius:5px;text-align:center;color:#F1F4F2;font-size:11px;} QProgressBar::chunk {background:" + ("#648c50" if bar is self.health_bar else "#B69460") + ";border-radius:4px;}")
+            bar_row = QHBoxLayout()
+            label = QLabel(title)
+            label.setObjectName("subtitle")
+            label.setFixedWidth(58)
+            bar_row.addWidget(label)
+            bar_row.addWidget(bar, 1)
+            character_bars.addLayout(bar_row)
+        facts.addLayout(character_bars, (len(fact_keys) + 1) // 2, 0, 1, 4)
         character_row.addLayout(facts, 1)
         box.addLayout(character_row)
+        self.resource_chips = {}
+        resource_row = QHBoxLayout()
+        resource_row.setSpacing(6)
+        for key, title in (("healthPotions", "药水"), ("bossTickets", "遗迹券"),
+                            ("atonementStones", "赎罪石"), ("townStones", "回城石"),
+                            ("evil", "恶名")):
+            chip = QLabel(f"{title}  —")
+            chip.setObjectName("resourceChip")
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setToolTip("等待实时角色快照")
+            self.resource_chips[key] = chip
+            resource_row.addWidget(chip, 1)
+        box.addLayout(resource_row)
         gear_title = QLabel("已穿戴装备")
         gear_title.setObjectName("fieldLabel")
         gear_header = QHBoxLayout()
@@ -985,7 +1027,7 @@ class MainWindow(QMainWindow):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setMinimumWidth(0)
             label.setWordWrap(True)
-            label.setStyleSheet("background:#1b1e1b;border:1px solid #363d33;border-radius:5px;padding:5px;")
+            label.setStyleSheet("background:#191D1E;border:1px solid #363D3C;border-radius:6px;padding:6px;")
             self.gear_slots[slot] = (name, label)
             cell = QWidget()
             cell_row = QHBoxLayout(cell)
@@ -1047,7 +1089,7 @@ class MainWindow(QMainWindow):
         self.map_activity.setMaximumHeight(30)
         overview = QHBoxLayout()
         overview.setSpacing(14)
-        character.setFixedHeight(340)
+        character.setMinimumHeight(0)
         map_card.setFixedHeight(300)
         overview.addWidget(character, 1, Qt.AlignmentFlag.AlignTop)
         overview.addWidget(map_card, 0, Qt.AlignmentFlag.AlignTop)
@@ -1059,36 +1101,72 @@ class MainWindow(QMainWindow):
         quest_box = QVBoxLayout(quest_page)
         quest_box.setContentsMargins(10, 12, 10, 10)
         quest_box.setSpacing(10)
+        quest_box.setAlignment(Qt.AlignmentFlag.AlignTop)
         quest_row = QHBoxLayout()
-        quest_row.setSpacing(14)
+        quest_row.setSpacing(12)
         place(quest_row, self.auto_quest)
         place(quest_row, self.task_limited_mode)
-        quest_row.addStretch()
+        place(quest_row, self.quest_map_auto)
+        quest_row.addStretch(1)
+        self.refresh_profile_button.setFixedWidth(132)
         place(quest_row, self.refresh_profile_button)
         quest_box.addLayout(quest_row)
-        quest_travel_row = QHBoxLayout()
-        place(quest_travel_row, self.quest_map_auto)
-        quest_travel_row.addStretch(1)
-        quest_box.addLayout(quest_travel_row)
+        self.quest_status.setFixedHeight(24)
         place(quest_box, self.quest_status)
         self.quest_table.setMinimumHeight(160)
-        self.quest_table.setMaximumHeight(16777215)
-        place(quest_box, self.quest_table, 1)
+        self.quest_table.setMaximumHeight(240)
+        place(quest_box, self.quest_table)
         tabs.addTab(quest_page, "任务")
         monsters_page = QWidget()
         monsters_box = QVBoxLayout(monsters_page)
+        monsters_box.setContentsMargins(10, 12, 10, 10)
+        monsters_box.setSpacing(8)
+        monsters_box.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.monster_empty_state = QFrame()
+        self.monster_empty_state.setObjectName("emptyState")
+        self.monster_empty_state.setMaximumHeight(88)
+        monster_empty_layout = QHBoxLayout(self.monster_empty_state)
+        monster_empty_layout.setContentsMargins(14, 10, 14, 10)
+        monster_empty_layout.setSpacing(12)
+        monster_art = QLabel()
+        monster_art.setFixedSize(38, 38)
+        monster_pixmap = QPixmap(str(Path(__file__).with_name("assets") / "monster.webp"))
+        if not monster_pixmap.isNull():
+            monster_art.setPixmap(monster_pixmap.scaled(34, 34, Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation))
+        monster_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        monster_empty_layout.addWidget(monster_art)
+        monster_empty_copy = QVBoxLayout()
+        monster_empty_copy.setSpacing(2)
+        self.monster_empty_title = QLabel("等待怪物数据")
+        self.monster_empty_title.setObjectName("sectionTitle")
+        monster_empty_copy.addWidget(self.monster_empty_title)
+        self.monster_empty_detail = QLabel("连接游戏后会列出当前地图发现的存活怪物。")
+        self.monster_empty_detail.setObjectName("subtitle")
+        self.monster_empty_detail.setWordWrap(True)
+        monster_empty_copy.addWidget(self.monster_empty_detail)
+        monster_empty_layout.addLayout(monster_empty_copy, 1)
+        monsters_box.addWidget(self.monster_empty_state)
         self.encounter_id_toggle.setParent(root)
         self.encounter_id_toggle.hide()
         self.monster_table.setColumnHidden(0, False)
         self.monster_table.horizontalHeader().moveSection(0, 5)
         self.monster_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.monster_table.setColumnWidth(0, 285)
-        self.monster_table.setMaximumHeight(16777215)
-        place(monsters_box, self.monster_table, 1)
+        self.monster_table.setMinimumHeight(120)
+        self.monster_table.setMaximumHeight(260)
+        place(monsters_box, self.monster_table)
+        self.monster_table.hide()
+        self.monster_empty_state.show()
         tabs.addTab(monsters_page, "怪物")
         log_page = QWidget()
         log_box = QVBoxLayout(log_page)
-        place(log_box, self.clear_button)
+        log_box.setContentsMargins(10, 12, 10, 10)
+        log_tools = QHBoxLayout()
+        log_tools.addStretch(1)
+        self.clear_button.setFixedSize(108, 32)
+        place(log_tools, self.clear_button)
+        log_box.addLayout(log_tools)
         place(log_box, self.log, 1)
         tabs.addTab(log_page, "运行日志")
         tools_page = QWidget()
@@ -1098,6 +1176,135 @@ class MainWindow(QMainWindow):
         place(tools_box, self.message, 1)
         place(tools_box, self.send_button)
         tabs.addTab(tools_page, "调试")
+        social_page = QWidget()
+        social_box = QVBoxLayout(social_page)
+        social_box.setContentsMargins(10, 12, 10, 10)
+        social_box.setSpacing(12)
+        social_header = QHBoxLayout()
+        self.balance_label = QLabel("TABBY 余额：等待读取")
+        self.balance_label.setObjectName("sectionTitle")
+        social_header.addWidget(self.balance_label)
+        self.mail_unread_label = QLabel("未读邮件：—")
+        self.mail_unread_label.setObjectName("subtitle")
+        social_header.addWidget(self.mail_unread_label)
+        social_header.addStretch(1)
+        balance_refresh = QPushButton("刷新余额与背包")
+        balance_refresh.setObjectName("quietButton")
+        balance_refresh.clicked.connect(self.refresh_social_data)
+        social_header.addWidget(balance_refresh)
+        social_box.addLayout(social_header)
+        social_tabs = QTabWidget()
+        social_tabs.setDocumentMode(True)
+        social_tabs.tabBar().setDrawBase(False)
+        inventory_card = QFrame()
+        inventory_card.setObjectName("card")
+        inventory_box = QVBoxLayout(inventory_card)
+        inventory_box.setContentsMargins(14, 12, 14, 14)
+        inventory_box.addWidget(QLabel("背包与装备"))
+        self.social_inventory_table = QTableWidget(0, 5)
+        self.social_inventory_table.setHorizontalHeaderLabels(["物品", "部位", "品质", "等级", "状态"])
+        self.social_inventory_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.social_inventory_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.social_inventory_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.social_inventory_table.itemSelectionChanged.connect(self.update_inventory_action_button)
+        self.social_inventory_table.verticalHeader().setVisible(False)
+        self.social_inventory_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, 5):
+            self.social_inventory_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.social_inventory_table.setMinimumHeight(220)
+        self.social_inventory_table.setMaximumHeight(440)
+        inventory_box.addWidget(self.social_inventory_table, 1)
+        inventory_actions = QHBoxLayout()
+        self.equip_item_button = QPushButton("装备所选")
+        self.equip_item_button.setObjectName("primaryButton")
+        self.equip_item_button.clicked.connect(self.equip_selected_item)
+        self.sell_item_button = QPushButton("上架出售")
+        self.sell_item_button.setObjectName("secondaryButton")
+        self.sell_item_button.setToolTip("当前提取到的游戏客户端没有物品上架接口定义，因此暂不发送交易请求。")
+        self.sell_item_button.setEnabled(False)
+        inventory_actions.addWidget(self.equip_item_button)
+        inventory_actions.addWidget(self.sell_item_button)
+        inventory_box.addLayout(inventory_actions)
+        self.inventory_action_status = QLabel("装备操作会调用游戏现有装备接口；出售等待服务端上架协议。")
+        self.inventory_action_status.setObjectName("subtitle")
+        self.inventory_action_status.setWordWrap(True)
+        inventory_box.addWidget(self.inventory_action_status)
+        inventory_page = QWidget()
+        inventory_page_layout = QVBoxLayout(inventory_page)
+        inventory_page_layout.setContentsMargins(8, 8, 8, 8)
+        inventory_page_layout.addWidget(inventory_card, 1)
+        social_tabs.addTab(inventory_page, "背包与装备")
+        mode_card = QFrame()
+        mode_card.setObjectName("card")
+        mode_box = QVBoxLayout(mode_card)
+        mode_box.setContentsMargins(14, 12, 14, 14)
+        mode_box.addWidget(QLabel("角色状态与仇杀"))
+        mode_row = QHBoxLayout()
+        self.combat_mode = QComboBox()
+        for label, value in (("和平", 0), ("战斗", 1), ("仇杀", 2)):
+            self.combat_mode.addItem(label, value)
+        mode_row.addWidget(self.combat_mode, 1)
+        self.set_mode_button = QPushButton("应用")
+        self.set_mode_button.setObjectName("primaryButton")
+        self.set_mode_button.clicked.connect(self.set_combat_mode)
+        mode_row.addWidget(self.set_mode_button)
+        mode_box.addLayout(mode_row)
+        self.mode_status = QLabel("等待实时角色状态")
+        self.mode_status.setObjectName("subtitle")
+        self.mode_status.setWordWrap(True)
+        mode_box.addWidget(self.mode_status)
+        self.live_telemetry = QLabel("战斗票据、延迟与最近目标将在连接后显示。")
+        self.live_telemetry.setObjectName("subtitle")
+        self.live_telemetry.setWordWrap(True)
+        mode_box.addWidget(self.live_telemetry)
+        self.enemy_table = QTableWidget(0, 3)
+        self.enemy_table.setHorizontalHeaderLabels(["附近玩家", "状态", "生命"])
+        self.enemy_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.enemy_table.verticalHeader().setVisible(False)
+        self.enemy_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.enemy_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.enemy_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.enemy_table.setMinimumHeight(120)
+        self.enemy_table.setMinimumHeight(180)
+        self.enemy_table.setMaximumHeight(420)
+        mode_box.addWidget(self.enemy_table, 1)
+        self.enemy_hint = QLabel("名单来自实时地图快照；服务端没有提供持久化仇人名单接口。")
+        self.enemy_hint.setObjectName("subtitle")
+        self.enemy_hint.setWordWrap(True)
+        mode_box.addWidget(self.enemy_hint)
+        players_page = QWidget()
+        players_layout = QVBoxLayout(players_page)
+        players_layout.setContentsMargins(8, 8, 8, 8)
+        players_layout.addWidget(mode_card, 1)
+        social_tabs.addTab(players_page, "状态与玩家")
+        chat_card = QFrame()
+        chat_card.setObjectName("card")
+        chat_box = QVBoxLayout(chat_card)
+        chat_box.setContentsMargins(14, 12, 14, 14)
+        chat_box.addWidget(QLabel("世界聊天"))
+        self.social_chat_log = QPlainTextEdit()
+        self.social_chat_log.setReadOnly(True)
+        self.social_chat_log.setMaximumBlockCount(200)
+        self.social_chat_log.setPlaceholderText("连接后显示收到的世界聊天消息。")
+        chat_box.addWidget(self.social_chat_log, 1)
+        chat_row = QHBoxLayout()
+        self.social_chat_input = QLineEdit()
+        self.social_chat_input.setPlaceholderText("输入世界消息")
+        self.social_chat_input.returnPressed.connect(self.send_chat_message)
+        chat_row.addWidget(self.social_chat_input, 1)
+        chat_send = QPushButton("发送")
+        chat_send.setObjectName("secondaryButton")
+        chat_send.clicked.connect(self.send_chat_message)
+        chat_row.addWidget(chat_send)
+        chat_box.addLayout(chat_row)
+        chat_page = QWidget()
+        chat_page_layout = QVBoxLayout(chat_page)
+        chat_page_layout.setContentsMargins(8, 8, 8, 8)
+        chat_page_layout.addWidget(chat_card, 1)
+        social_tabs.addTab(chat_page, "世界聊天")
+        social_box.addWidget(social_tabs, 1)
+        tabs.addTab(social_page, "角色与社交")
+        tabs.currentChanged.connect(lambda index: self.refresh_social_data() if tabs.widget(index) is social_page else None)
         right.addWidget(tabs, 1)
         scroll = QScrollArea()
         scroll.setObjectName("mainScroll")
@@ -1110,19 +1317,22 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 700)
         self.resize(1180, 850)
         self.setStyleSheet(self.styleSheet() + """
-            QLabel { color: #d5dccd; }
-            QTabWidget::pane { border: 1px solid #363d33; background: #222522; border-radius: 10px; }
-            QTabBar::tab { background: transparent; color: #a8afa3; padding: 10px 18px; border-bottom: 2px solid transparent; }
-            QTabBar::tab:selected { color: #afc69e; border-bottom: 2px solid #afc69e; }
-            QTabBar::tab:hover { background: #30382c; }
-            QComboBox { color: #e3edf7; background: #1b1e1b; border: 1px solid #424a3e; border-radius: 7px; padding: 8px; }
-            QComboBox QAbstractItemView { color: #e3edf7; background: #293025; selection-background-color: #285b50; }
-            QHeaderView { background: #30352f; }
-            QPushButton:focus, QCheckBox:focus, QComboBox:focus { border: 1px solid #afc69e; }
+            QLabel { color: #E8ECEB; }
+            QTabWidget::pane { border: 0; background: transparent; }
+            QTabBar::tab { background: transparent; color: #AAB4B1; padding: 9px 13px; min-height: 26px; border: 0; border-bottom: 2px solid transparent; margin-right: 8px; }
+            QTabBar::tab:selected { color: #E5EBE4; background: transparent; border-bottom: 2px solid #78936B; }
+            QTabBar::tab:hover { color: #FFFFFF; background: #222627; border-bottom: 2px solid #535A56; }
+            QTabBar::tab:selected:hover { border-bottom-color: #91AD80; }
+            QComboBox { color: #E8ECEB; background: #191D1E; border: 1px solid #535A56; border-radius: 7px; padding: 8px; }
+            QComboBox QAbstractItemView { color: #E8ECEB; background: #292E2D; selection-background-color: #38533A; }
+            QHeaderView { background: #292E2D; }
+            QPushButton:focus, QCheckBox:focus, QComboBox:focus { border: 1px solid #9D875C; }
+            QLabel#resourceChip { background:#292E2D; color:#D1D8D5; border:1px solid #414846; border-radius:7px; padding:7px 4px; font-size:11px; }
         """)
         for button in root.findChildren(QPushButton):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_map_buttons()
+        self.update_mode_control()
 
     def log_clear(self) -> None:
         self.log.clear()
@@ -1142,41 +1352,42 @@ class MainWindow(QMainWindow):
     def apply_theme(self) -> None:
         check_icon = Path(__file__).with_name("assets") / "checkmark.svg"
         self.setStyleSheet("""
-            QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #181a19; color: #e6e8df; }
-            QFrame#card { background: #222522; border: 1px solid #363d33; border-radius: 12px; }
-            QFrame#sessionCard { background: #152132; border: 1px solid #30425a; border-radius: 10px; }
-            QLabel#title { color: #f7faff; font-size: 23px; font-weight: 700; }
-            QLabel#subtitle { color: #a8afa3; font-size: 12px; }
-            QLabel#sectionTitle { color: #e6e8df; font-size: 15px; font-weight: 700; }
-            QLabel#fieldLabel { color: #afbed2; font-size: 12px; font-weight: 600; }
-            QLabel#currentMapBadge { color: #f0f4e8; background: #33432d; border: 1px solid #718b5f; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-weight: 700; }
-            QLabel#sessionUrl { color: #dce8f7; font-family: Menlo, monospace; font-size: 13px; }
-            QLabel#status { color: #a8bad0; font-size: 12px; font-weight: 700; }
-            QLineEdit, QPlainTextEdit, QSpinBox { background: #1b1e1b; color: #e1e6da; border: 1px solid #424a3e; border-radius: 8px; padding: 8px 10px; selection-background-color: #2c6e5a; }
-            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #4cc48b; }
-            QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #788ba3; }
+            QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #17191A; color: #E8ECEB; }
+            QFrame#card { background: #222627; border: 1px solid #363D3C; border-radius: 12px; }
+            QFrame#emptyState { background: #1B1E1F; border: 1px dashed #4A514E; border-radius: 10px; }
+            QFrame#sessionCard { background: #252A29; border: 1px solid #66583E; border-radius: 10px; }
+            QLabel#title { color: #F3F5F3; font-size: 23px; font-weight: 700; }
+            QLabel#subtitle { color: #AAB4B1; font-size: 12px; }
+            QLabel#sectionTitle { color: #E8ECEB; font-size: 15px; font-weight: 700; }
+            QLabel#fieldLabel { color: #B7C0BD; font-size: 12px; font-weight: 600; }
+            QLabel#currentMapBadge { color: #E8ECEB; background: #29392C; border: 1px solid #58744C; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-weight: 700; }
+            QLabel#sessionUrl { color: #D9E0DE; font-family: Menlo, monospace; font-size: 13px; }
+            QLabel#status { color: #AAB4B1; font-size: 12px; font-weight: 700; }
+            QLineEdit, QPlainTextEdit, QSpinBox { background: #191D1E; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 8px; padding: 8px 10px; selection-background-color: #38533A; }
+            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #9D875C; }
+            QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #818B88; }
             QLineEdit#urlInput, QPlainTextEdit#messageInput, QPlainTextEdit#logView { font-family: Menlo, monospace; font-size: 12px; }
-            QPlainTextEdit#logView { background: #1b1e1a; color: #d3e1ef; border: 1px solid #243248; }
-            QTableWidget { background: #1b1e1b; alternate-background-color: #272c26; color: #e1e6da; border: 1px solid #424a3e; border-radius: 8px; gridline-color: #363d33; selection-background-color: #275f4b; }
-            QHeaderView::section { background: #30352f; color: #b9cbe0; border: 0; border-bottom: 1px solid #424a3e; padding: 7px; font-weight: 600; }
-            QPushButton { min-height: 30px; padding: 2px 15px; border-radius: 7px; font-weight: 600; }
-            QPushButton#primaryButton { background: #9bb490; color: #182017; border: 1px solid #9bb490; }
-            QPushButton#primaryButton:hover { background: #aec4a4; border-color: #aec4a4; }
-            QPushButton#secondaryButton { background: #30362e; color: #dce2d5; border: 1px solid #4a5545; }
-            QPushButton#secondaryButton:hover { background: #3c4637; }
-            QPushButton#secondaryButton[currentMap="true"] { background: #415536; color: #f3f7e9; border: 2px solid #9bb490; }
-            QPushButton#quietButton { background: transparent; color: #aab5a4; border: 1px solid transparent; padding-left: 5px; padding-right: 5px; }
-            QPushButton#quietButton:hover { color: #e7f3ff; background: #343e2f; }
-            QPushButton:disabled { background: #253245; color: #77889b; border: 1px solid #34445b; }
-            QCheckBox { color: #cbd9e8; spacing: 10px; }
-            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #64715e; background: #171b17; }
-            QCheckBox::indicator:hover { border-color: #b0c99e; background: #273026; }
-            QCheckBox::indicator:checked { background: #8eae80; border: 1px solid #8eae80; image: url("@CHECK_ICON@"); }
-            QCheckBox[taskOption="true"] { color: #dce5d5; spacing: 10px; padding: 5px 11px; min-height: 30px; background: #1d211d; border: 1px solid #3c4738; border-radius: 8px; }
-            QCheckBox[taskOption="true"]:hover { background: #252d23; border-color: #627454; }
-            QCheckBox[taskOption="true"]:checked { border-color: #718b5f; }
-            QScrollBar:vertical { background: #181a19; width: 10px; }
-            QScrollBar::handle:vertical { background: #32445b; border-radius: 5px; min-height: 25px; }
+            QPlainTextEdit#logView { background: #191D1E; color: #D5DDDA; border: 1px solid #363D3C; }
+            QTableWidget { background: #1B1F20; alternate-background-color: #232829; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 8px; gridline-color: #363D3C; selection-background-color: #354735; }
+            QHeaderView::section { background: #292E2D; color: #C6CFCC; border: 0; border-bottom: 1px solid #444C4A; padding: 8px; font-weight: 600; }
+            QPushButton { min-height: 32px; padding: 3px 15px; border-radius: 8px; font-weight: 600; }
+            QPushButton#primaryButton { background: #3C7951; color: #F4F7F4; border: 1px solid #579166; }
+            QPushButton#primaryButton:hover { background: #498D5D; border-color: #70A877; }
+            QPushButton#secondaryButton { background: #302A25; color: #E6E8E5; border: 1px solid #766448; }
+            QPushButton#secondaryButton:hover { background: #494036; border-color: #B69460; }
+            QPushButton#secondaryButton[currentMap="true"] { background: #304333; color: #F1F5EF; border: 2px solid #81966B; }
+            QPushButton#quietButton { background: #292E2D; color: #D5DDDA; border: 1px solid #535A56; padding-left: 12px; padding-right: 12px; }
+            QPushButton#quietButton:hover { color: #FFFFFF; background: #343A37; border-color: #9D875C; }
+            QPushButton:disabled { background: #242827; color: #78817E; border: 1px solid #363D3C; }
+            QCheckBox { color: #D2D9D6; spacing: 10px; }
+            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #59615D; background: #191D1E; }
+            QCheckBox::indicator:hover { border-color: #9D875C; background: #292E2D; }
+            QCheckBox::indicator:checked { background: #3C7951; border: 1px solid #70A877; image: url("@CHECK_ICON@"); }
+            QCheckBox[taskOption="true"] { color: #E1E6E3; spacing: 10px; padding: 5px 11px; min-height: 30px; background: #292E2D; border: 1px solid #414846; border-radius: 8px; }
+            QCheckBox[taskOption="true"]:hover { background: #343A37; border-color: #766448; }
+            QCheckBox[taskOption="true"]:checked { border-color: #648468; }
+            QScrollBar:vertical { background: #17191A; width: 10px; }
+            QScrollBar::handle:vertical { background: #4A514E; border-radius: 5px; min-height: 25px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """.replace("@CHECK_ICON@", str(check_icon).replace("\\", "/")))
 
@@ -1194,6 +1405,9 @@ class MainWindow(QMainWindow):
         else:
             color = "#536273"
         self.status.setStyleSheet(f"color: {color}; font-weight: 700; background: transparent; border: 0;")
+        callback = getattr(self, "on_state_change", None)
+        if callable(callback):
+            callback(state)
 
     def on_connected(self, ws: MiniWebSocket) -> None:
         if ws is None:
@@ -1592,6 +1806,8 @@ class MainWindow(QMainWindow):
         self.update_map_buttons()
 
     def reset_world_state(self) -> None:
+        if hasattr(self, "telemetry_timer"):
+            self.telemetry_timer.stop()
         if hasattr(self, "move_timer"):
             self.move_timer.stop()
         if hasattr(self, "combat_timer"):
@@ -1630,6 +1846,7 @@ class MainWindow(QMainWindow):
         self.monsters = {}
         self.last_self_state = {}
         self.last_progress_state = {}
+        self.last_peers = []
         self.api_profile = {}
         self.api_equipment = {}
         self.profile_refresh_inflight = False
@@ -1642,6 +1859,8 @@ class MainWindow(QMainWindow):
         self.last_attacked_monster = None
         self.last_attack_ticket = None
         self.attack_busy_until = 0.0
+        self.pending_pings = {}
+        self.last_rtt_ms = None
         self.combat_generation = getattr(self, "combat_generation", 0) + 1
         self.chase_target = None
         self.chase_route = []
@@ -1656,6 +1875,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "quest_table"):
             self.quest_table.setRowCount(0)
             self.quest_status.setText("等待服务端任务数据…")
+        if hasattr(self, "resource_chips"):
+            for key, label in self.resource_chips.items():
+                title = {"healthPotions": "生命药水", "bossTickets": "遗迹入场券",
+                         "atonementStones": "赎罪石", "townStones": "回城石", "evil": "恶名值"}[key]
+                label.setText(f"{title}  —")
+        if hasattr(self, "live_telemetry"):
+            self.update_live_telemetry()
 
     def update_map_buttons(self) -> None:
         ready = self.ws is not None and self.world_ready and not self.server_dead and self.pending_destination is None
@@ -1691,7 +1917,19 @@ class MainWindow(QMainWindow):
 
     def accept_packet(self, packet: dict) -> None:
         kind = packet.get("type")
-        if kind == "welcome" and isinstance(packet.get("position"), dict):
+        if kind == "pong":
+            try:
+                sent_at = int(packet.get("sentAt"))
+                started = self.pending_pings.pop(sent_at, None)
+                if started is not None:
+                    self.last_rtt_ms = max(0, round((time.monotonic() - started) * 1000))
+            except (TypeError, ValueError):
+                pass
+            self.update_live_telemetry()
+            latency_callback = getattr(self, "on_latency_change", None)
+            if callable(latency_callback):
+                latency_callback()
+        elif kind == "welcome" and isinstance(packet.get("position"), dict):
             self.welcome_at = time.monotonic()
             position = packet["position"]
             self.current_map = int(position.get("map", 1))
@@ -1721,6 +1959,22 @@ class MainWindow(QMainWindow):
                 if operation == "respawn" and isinstance(packet.get("position"), dict):
                     self_state["dead"] = False
                 self.server_dead = bool(self_state.get("dead", False))
+                if hasattr(self, "combat_mode") and "combatMode" in self_state:
+                    try:
+                        mode_index = max(0, min(2, int(self_state.get("combatMode", 0))))
+                    except (TypeError, ValueError):
+                        mode_index = 0
+                    self.combat_mode.blockSignals(True)
+                    self.combat_mode.setCurrentIndex(mode_index)
+                    self.combat_mode.blockSignals(False)
+                    try:
+                        unlock = int(self_state.get("modeRemaining", 0) or 0)
+                    except (TypeError, ValueError):
+                        unlock = 0
+                    self.mode_status.setText(f"当前：{('和平', '战斗', '仇杀')[mode_index]}" +
+                                             (f" · 冷却 {unlock} 秒" if unlock > 0 else "") +
+                                             (f" · 公会 #{self_state['guildId']}" if self_state.get("guildId") else ""))
+                    self.update_mode_control(unlock)
                 self.refresh_character_status()
                 if self.server_dead:
                     detected_death = not self.respawn_pending and self.respawn_attempts < 3
@@ -1775,6 +2029,7 @@ class MainWindow(QMainWindow):
                 self.world_ready = True
                 self.append_log("游戏世界已就绪；后续高频 snapshot 已折叠。")
                 self.keepalive.start()
+                self.telemetry_timer.start()
                 self.send_stationary_sync(force=True)
                 self.position_sync_timer.start()
                 if not self.server_dead and not self.auto_attack.isChecked():
@@ -1783,11 +2038,15 @@ class MainWindow(QMainWindow):
                     self.combat_timer.start()
                 if self.questless_farm_mode:
                     QTimer.singleShot(500, self.continue_quest_map_travel)
-                self.refresh_profile_data()
+                self.refresh_social_data()
             self.update_map_buttons()
             if detected_death:
                 self.travel_status.setText("检测到角色阵亡，正在自动请求回到城镇…")
                 QTimer.singleShot(0, self.request_respawn)
+            self.update_nearby_players(packet.get("peers", []))
+            if isinstance(packet.get("peers"), list):
+                self.last_peers = packet["peers"]
+            self.update_live_telemetry()
         elif kind == "travel_result":
             self.move_timer.stop()
             self.stop_chase()
@@ -1818,6 +2077,14 @@ class MainWindow(QMainWindow):
                 self.return_map_target = None
                 self.quest_map_target = None
                 self.quest_map_quest_id = None
+        elif kind == "chat":
+            self.append_social_chat(packet.get("messages", []))
+        elif kind == "scoped_chat":
+            self.append_social_chat(packet.get("message", {}), str(packet.get("channel", "附近")))
+        elif kind == "chat_ack":
+            code = str(packet.get("code", ""))
+            if code:
+                self.social_chat_log.appendPlainText(f"[系统] 消息状态：{code}")
         elif kind == "attack_ready" and isinstance(packet.get("nextAttack"), dict):
             self.accept_attack_ticket(packet["nextAttack"])
         elif kind == "hit" and isinstance(packet.get("hit"), dict):
@@ -1837,6 +2104,7 @@ class MainWindow(QMainWindow):
                     f"命中 {hit['monster']}：伤害 {hit.get('damage', '?')}"
                     + (" · 暴击" if hit.get("critical") else "")
                 )
+            self.update_live_telemetry()
             self.refresh_profile_data()
         elif kind == "error" and self.is_quest_limit_response(packet):
             self.handle_quest_limit_reached(self.quest_error_text(packet))
@@ -1971,6 +2239,7 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     pass
         self.quest_table.setRowCount(len(rows))
+        self.quest_table.setVisible(True)
         for index, quest in enumerate(rows):
             done = bool(quest.get("completed"))
             accepted = bool(quest.get("accepted"))
@@ -2315,26 +2584,48 @@ class MainWindow(QMainWindow):
         self.refresh_profile_button.setEnabled(True)
         self.refresh_profile_button.setText("刷新中…")
 
+        threading.Thread(target=self.refresh_mail_unread, args=(api_root, token), daemon=True).start()
+
         def worker() -> None:
             result = {}
             try:
                 for key, endpoint in (("player", "/player"), ("equipment", "/equipment"),
                                       ("progression", "/progression")):
-                    request = urllib.request.Request(
-                        api_root + endpoint,
-                        headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
-                        method="GET",
-                    )
-                    with urllib.request.urlopen(request, timeout=8) as response:
-                        if response.status == 200:
-                            payload = json.loads(response.read().decode("utf-8"))
-                            if isinstance(payload, dict):
-                                result[key] = payload
+                    try:
+                        request = urllib.request.Request(
+                            api_root + endpoint,
+                            headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+                            method="GET",
+                        )
+                        with urllib.request.urlopen(request, timeout=8) as response:
+                            if response.status == 200:
+                                payload = json.loads(response.read().decode("utf-8"))
+                                if isinstance(payload, (dict, list, int, float)):
+                                    result[key] = payload
+                    except Exception as exc:
+                        result[key + "Error"] = f"{type(exc).__name__}: {exc}"
             except Exception as exc:
                 result["error"] = f"{type(exc).__name__}: {exc}"
             self.bridge.profile.emit(result)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_mail_unread(self, api_root: str, token: str) -> None:
+        result = {}
+        try:
+            request = urllib.request.Request(
+                api_root + "/progression/mail/unread",
+                headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+                method="GET",
+            )
+            with urllib.request.urlopen(request, timeout=8) as response:
+                if response.status == 200:
+                    result["mailUnread"] = json.loads(response.read().decode("utf-8"))
+                else:
+                    result["mailUnreadError"] = f"HTTP {response.status}"
+        except Exception as exc:
+            result["mailUnreadError"] = f"{type(exc).__name__}: {exc}"
+        self.bridge.profile.emit(result)
 
     def claim_encounter_reward(self, encounter_id: str) -> None:
         token = self.get_session_token()
@@ -2370,6 +2661,41 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def accept_profile_data(self, data: dict) -> None:
+        if isinstance(data, dict) and data.get("socialApiKey"):
+            key = str(data["socialApiKey"])
+            if data.get("socialApiError"):
+                if key == "balance":
+                    self.balance_label.setText("TABBY 余额：暂不可用")
+                    self.balance_label.setToolTip(str(data["socialApiError"]))
+                elif key in {"equip", "unequip"}:
+                    self.inventory_action_status.setText("装备操作失败：" + str(data["socialApiError"]))
+            elif key == "balance":
+                payload = data.get("socialApiResult", {})
+                nested = payload.get("balance", payload) if isinstance(payload, dict) else payload
+                if isinstance(nested, dict):
+                    amount = next((nested[k] for k in ("balance", "amount", "available", "tabby", "TABBY") if k in nested), None)
+                    try:
+                        display_amount = f"{float(amount):,.2f}"
+                    except (TypeError, ValueError):
+                        display_amount = str(amount) if amount is not None else "已读取"
+                    self.balance_label.setText(f"TABBY 余额：{display_amount}")
+                    self.balance_label.setToolTip(json.dumps(nested, ensure_ascii=False, indent=2))
+                else:
+                    self.balance_label.setText(f"TABBY 余额：{nested}")
+            elif key in {"equip", "unequip"}:
+                self.inventory_action_status.setText("装备状态已更新，正在刷新背包…")
+                self.refresh_profile_data(force=True)
+            return
+        if isinstance(data, dict) and ("mailUnread" in data or "mailUnreadError" in data):
+            payload = data.get("mailUnread")
+            if isinstance(payload, (dict, list, int, float)):
+                unread = self.find_unread_count(payload)
+                self.mail_unread_label.setText(f"邮件未读：{unread}" if unread is not None else "邮件：已读取")
+                self.mail_unread_label.setToolTip(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                self.mail_unread_label.setText("邮件：暂不可用")
+                self.mail_unread_label.setToolTip(str(data["mailUnreadError"]))
+            return
         if isinstance(data, dict) and data.get("questRefresh"):
             self.quest_accept_inflight = False
             if data.get("questError"):
@@ -2404,6 +2730,7 @@ class MainWindow(QMainWindow):
             if isinstance(quests, list):
                 self.update_quests(quests)
         self.refresh_character_status()
+        self.update_social_inventory()
         if data.get("error"):
             self.append_log("角色/任务刷新未完成：" + str(data["error"]))
         if data.get("claimEncounterId"):
@@ -2412,6 +2739,25 @@ class MainWindow(QMainWindow):
                 self.append_log(f"击败结算未完成 {data['claimEncounterId']}：{data['claimError']}")
             else:
                 self.append_log(f"击败结算已同步：{data['claimEncounterId']}；任务进度已刷新。")
+
+    @staticmethod
+    def find_unread_count(payload: object) -> int | None:
+        """Read a known unread count without treating arbitrary totals as unread."""
+        if isinstance(payload, dict):
+            for key in ("unreadCount", "unread_count", "unread", "unreadMessages"):
+                value = payload.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return int(value)
+                if isinstance(value, list):
+                    return len(value)
+            for key in ("data", "result", "mail", "messages"):
+                if key in payload:
+                    found = MainWindow.find_unread_count(payload[key])
+                    if found is not None:
+                        return found
+        elif isinstance(payload, list):
+            return len(payload)
+        return None
         if self.profile_refresh_queued:
             self.profile_refresh_queued = False
             QTimer.singleShot(0, lambda: self.refresh_profile_data(force=True))
@@ -2424,27 +2770,35 @@ class MainWindow(QMainWindow):
         self_state = self.last_self_state if isinstance(self.last_self_state, dict) else {}
         equipment = self.api_equipment if isinstance(self.api_equipment, dict) else {}
         totals = equipment.get("totals", {}) if isinstance(equipment.get("totals", {}), dict) else {}
-        name = profile.get("playerName") or profile.get("name") or "角色"
+        name = profile.get("playerName") or profile.get("name") or "—"
         character_class = profile.get("characterClass") or profile.get("class") or "—"
         character_class = self_state.get("characterClass", character_class)
         class_display = CHARACTER_NAMES_ZH.get(str(character_class).upper(), character_class)
         if hasattr(self, "character_portrait"):
-            kind = "guard" if str(character_class).upper() == "GUARD" else "warrior"
-            sprite = QPixmap(str(Path(__file__).with_name("assets") / (kind + "-idle.webp")))
+            class_code = str(character_class).upper()
+            kind = {"GUARD": "guard", "WARRIOR": "warrior"}.get(class_code)
+            sprite = (QPixmap(str(Path(__file__).with_name("assets") / (kind + "-idle.webp")))
+                      if kind else QPixmap())
             if not sprite.isNull():
                 # Guard idle is a horizontal strip; the warrior asset is one frame.
                 frame = sprite.copy(0, 0, min(sprite.width(), sprite.height()), sprite.height())
+                self.character_portrait.setText("")
+                self.character_portrait.setStyleSheet("background:transparent;border:0;")
                 self.character_portrait.setPixmap(frame.scaled(68, 92, Qt.AspectRatioMode.KeepAspectRatio,
                                                                Qt.TransformationMode.SmoothTransformation))
-                self.character_portrait.setToolTip(f"{kind.upper()} · 项目原始待机素材")
+                self.character_portrait.setToolTip(f"{class_display} · 游戏原始待机素材")
+            else:
+                self.character_portrait.clear()
+                self.character_portrait.setText("连接后\n加载角色")
+                self.character_portrait.setStyleSheet("background:#292E2D;border:1px solid #414846;border-radius:10px;color:#AAB4B1;font-size:10px;")
         level = progress.get("level", profile.get("level", "—"))
         experience = progress.get("experience", profile.get("experience", "—"))
         experience_needed = progress.get("experienceNeeded", "—")
         health = self_state.get("health", "—")
         max_health = self_state.get("maxHealth", self_state.get("maximumHealth", totals.get("maxHealth", "—")))
-        attack = totals.get("attack", totals.get("attackPower", "—"))
-        defense = totals.get("defense", "—")
-        gold = profile.get("gold", "—")
+        attack = totals.get("attack", totals.get("attackPower", self_state.get("attack", "—")))
+        defense = totals.get("defense", self_state.get("defense", "—"))
+        gold = profile.get("gold", self_state.get("gold", "—"))
         status = "阵亡" if self.server_dead else "存活"
         if hasattr(self, "health_bar"):
             try:
@@ -2461,14 +2815,32 @@ class MainWindow(QMainWindow):
                 self.fatigue_bar.setFormat(f"剩余 {stamina:.0f}%")
             except (KeyError, TypeError, ValueError):
                 self.fatigue_bar.setFormat("等待疲劳数据")
+        if hasattr(self, "resource_chips"):
+            resource_names = {
+                "healthPotions": "生命药水", "bossTickets": "遗迹入场券",
+                "atonementStones": "赎罪石", "townStones": "回城石",
+                "evil": "恶名值",
+            }
+            for key, chip in self.resource_chips.items():
+                count = self_state.get(key)
+                if key == "townStones" and isinstance(count, list):
+                    display = str(len(count))
+                elif key == "evil" and isinstance(count, (int, float)):
+                    display = f"{int(count)}/10"
+                else:
+                    display = str(int(count)) if isinstance(count, (int, float)) else "—"
+                chip.setText(f"{resource_names[key]}  {display}")
+                chip.setToolTip(f"实时角色快照字段：{key}" if count is not None else "等待服务端提供该资源数量")
         self.update_backpack()
+        self.update_social_inventory()
         if hasattr(self, "character_facts"):
             values = {"角色": name, "职业": class_display,
-                      "等级": level, "状态": status, "生命": f"{health}/{max_health}",
+                      "等级": level, "状态": status,
                       "经验": f"{experience}/{experience_needed}", "攻击": attack, "防御": defense,
                       "金币": gold, "移速加成": f"{totals.get('moveSpeedPercent', 0)}%"}
             for key, value in values.items():
-                self.character_facts[key].setText(str(value))
+                if key in self.character_facts:
+                    self.character_facts[key].setText(str(value))
             items = equipment.get("items", [])
             equipped = {str(item.get("slotType")): item for item in items
                         if isinstance(item, dict) and item.get("equipped")} if isinstance(items, list) else {}
@@ -2480,7 +2852,7 @@ class MainWindow(QMainWindow):
                     color = quality_color(rarity)
                     label.setText(f"{caption} · {title}")
                     label.setToolTip(json.dumps(item, ensure_ascii=False, indent=2))
-                    label.setStyleSheet(f"background:#1b1e1b;border:1px solid #363d33;border-radius:5px;padding:5px;color:{color};font-weight:600;")
+                    label.setStyleSheet(f"background:#191D1E;border:1px solid #363D3C;border-radius:6px;padding:6px;color:{color};font-weight:600;")
                     stem = {"WEAPON": "sword", "HAT": "helmet", "ARMOR": "armor", "SHOES": "boots",
                             "RING": "ring", "AMULET": "amulet"}[slot]
                     level = item.get("equipmentLevel", 1)
@@ -2492,7 +2864,7 @@ class MainWindow(QMainWindow):
                     self.gear_icons[slot].clear()
                     label.setText(f"{caption} · 未穿戴" if "items" in equipment else f"{caption} · 等待装备数据")
                     label.setToolTip("")
-                    label.setStyleSheet("background:#1b1e1b;border:1px solid #363d33;border-radius:5px;padding:5px;color:#a8afa3;")
+                    label.setStyleSheet("background:#191D1E;border:1px solid #363D3C;border-radius:6px;padding:6px;color:#958976;")
         self.character_status.setText(
             f"{name} · {class_display}  |  等级 {level}  |  经验 {experience}/{experience_needed}  |  "
             f"生命 {health}/{max_health}  |  攻击 {attack}  |  防御 {defense}  |  金币 {gold}  |  {status}"
@@ -2502,6 +2874,46 @@ class MainWindow(QMainWindow):
         if ticket.get("id"):
             self.next_attack = ticket
             self.update_attack_button()
+            self.update_live_telemetry()
+
+    def update_live_telemetry(self) -> None:
+        """Show only server-backed combat and connection state."""
+        if not hasattr(self, "live_telemetry"):
+            return
+        rtt = f"{self.last_rtt_ms} ms" if self.last_rtt_ms is not None else "等待 pong"
+        ticket = self.next_attack.get("id") if isinstance(self.next_attack, dict) else None
+        remaining = max(0.0, self.attack_busy_until - time.monotonic())
+        if not ticket:
+            ticket_text = "等待攻击票据"
+        elif ticket in self.used_attack_tickets:
+            ticket_text = "等待新票据"
+        elif remaining > 0:
+            ticket_text = f"冷却 {remaining:.1f}s"
+        else:
+            ticket_text = "可攻击"
+        nearest = None
+        if self.world_x is not None and self.world_y is not None:
+            candidates = []
+            for encounter_id, monster in self.monsters.items():
+                if not isinstance(monster, dict):
+                    continue
+                try:
+                    if int(monster.get("health", 1)) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                distance = self.monster_distance(monster)
+                if math.isfinite(distance):
+                    candidates.append((distance, encounter_id, monster))
+            if candidates:
+                nearest = min(candidates, key=lambda row: row[0])
+        if nearest:
+            distance, encounter_id, monster = nearest
+            target_text = f"最近目标 {localized_monster_name(monster)} · {distance:.0f} 单位 · {str(encounter_id)[:8]}"
+        else:
+            target_text = "当前地图未见存活怪物"
+        map_text = MAP_NAMES.get(self.current_map, "未进入地图").split(" · ")[-1] if self.current_map else "未进入地图"
+        self.live_telemetry.setText(f"连接延迟 {rtt}  ·  攻击 {ticket_text}\n地图 {map_text}  ·  {target_text}")
 
     def open_backpack(self) -> None:
         if not hasattr(self, "backpack_dialog"):
@@ -2517,12 +2929,201 @@ class MainWindow(QMainWindow):
             self.backpack_table = QTableWidget(0, 4)
             self.backpack_table.setHorizontalHeaderLabels(["物品", "类型", "品质", "数量"])
             self.backpack_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.backpack_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.backpack_table.itemSelectionChanged.connect(self.update_backpack_action)
             self.backpack_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             layout.addWidget(self.backpack_table)
+            actions = QHBoxLayout()
+            self.backpack_equip_button = QPushButton("装备所选")
+            self.backpack_equip_button.setObjectName("primaryButton")
+            self.backpack_equip_button.setEnabled(False)
+            self.backpack_equip_button.clicked.connect(self.equip_backpack_selection)
+            self.backpack_sell_button = QPushButton("上架出售")
+            self.backpack_sell_button.setObjectName("secondaryButton")
+            self.backpack_sell_button.setEnabled(False)
+            self.backpack_sell_button.setToolTip("当前客户端源码没有提供物品上架协议，接口确认前禁用。")
+            actions.addWidget(self.backpack_equip_button)
+            actions.addWidget(self.backpack_sell_button)
+            layout.addLayout(actions)
         self.update_backpack()
         self.backpack_dialog.show()
         self.backpack_dialog.raise_()
         self.refresh_profile_data(force=True)
+
+    def _api_root(self) -> str:
+        parsed = urllib.parse.urlsplit(self.url.text().strip())
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        api_path = parsed.path.rstrip("/")
+        if api_path.endswith("/realtime"):
+            api_path = api_path[:-len("/realtime")]
+        return urllib.parse.urlunsplit((scheme, parsed.netloc, api_path, "", ""))
+
+    def request_social_api(self, key: str, path: str, method: str = "GET", body: dict | None = None) -> None:
+        token = self.get_session_token()
+        root = self._api_root()
+        if not token or not root:
+            if key == "balance":
+                self.balance_label.setText("TABBY 余额：请先连接账号")
+            return
+
+        def worker() -> None:
+            result = {"socialApiKey": key}
+            try:
+                encoded = json.dumps(body).encode("utf-8") if body is not None else None
+                headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+                if encoded is not None:
+                    headers["Content-Type"] = "application/json"
+                request = urllib.request.Request(root + path, data=encoded, headers=headers, method=method)
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    raw = response.read().decode("utf-8")
+                    result["socialApiResult"] = json.loads(raw) if raw else {}
+            except Exception as exc:
+                result["socialApiError"] = f"{type(exc).__name__}: {exc}"
+            self.bridge.profile.emit(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_social_data(self) -> None:
+        self.refresh_profile_data(force=True)
+        if time.monotonic() - self.balance_refreshed_at >= 15.0:
+            self.balance_refreshed_at = time.monotonic()
+            self.request_social_api("balance", "/tabby-balance")
+
+    def update_social_inventory(self) -> None:
+        if not hasattr(self, "social_inventory_table"):
+            return
+        items = self.api_equipment.get("items", []) if isinstance(self.api_equipment, dict) else []
+        items = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        self.social_inventory_table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            name = localized_item_name(item)
+            slot = str(item.get("slotType", "—"))
+            quality = str(item.get("qualityCode", "L1"))
+            level = str(item.get("equipmentLevel", "—"))
+            equipped = bool(item.get("equipped", False))
+            values = (name, SLOT_NAMES_ZH.get(slot.upper(), slot),
+                      QUALITY_NAMES_ZH.get(quality.upper(), quality), level,
+                      "已装备" if equipped else "背包")
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setForeground(QColor(quality_color(quality)))
+                if col == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, item)
+                    item_code = str(item.get("itemCode", "")).lower()
+                    icon_stem = next((stem for stem in ("sword", "helmet", "armor", "boots", "shoes", "ring", "amulet")
+                                      if stem in item_code), "")
+                    if icon_stem == "shoes":
+                        icon_stem = "boots"
+                    try:
+                        level_no = int(item.get("equipmentLevel", 1) or 1)
+                    except (TypeError, ValueError):
+                        level_no = 1
+                    icon_path = Path(__file__).with_name("assets") / f"{icon_stem}_p{level_no}.webp" if icon_stem else None
+                    if icon_path and icon_path.is_file():
+                        cell.setIcon(QIcon(str(icon_path)))
+                self.social_inventory_table.setItem(row, col, cell)
+        if hasattr(self, "inventory_action_status"):
+            self.inventory_action_status.setText(f"共 {len(items)} 件装备；品质颜色与商城统一：白、蓝、紫、金。")
+        self.update_inventory_action_button()
+
+    def update_inventory_action_button(self) -> None:
+        if not hasattr(self, "equip_item_button"):
+            return
+        row = self.social_inventory_table.currentRow()
+        item_cell = self.social_inventory_table.item(row, 0) if row >= 0 else None
+        item = item_cell.data(Qt.ItemDataRole.UserRole) if item_cell else None
+        self.equip_item_button.setEnabled(isinstance(item, dict))
+        self.equip_item_button.setText("卸下所选" if isinstance(item, dict) and item.get("equipped") else "装备所选")
+
+    def equip_selected_item(self) -> None:
+        row = self.social_inventory_table.currentRow()
+        cell = self.social_inventory_table.item(row, 0) if row >= 0 else None
+        item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        if not isinstance(item, dict):
+            self.inventory_action_status.setText("先从背包列表选择一件装备。")
+            return
+        if item.get("equipped"):
+            self.request_social_api("unequip", "/equipment/unequip", "POST",
+                                    {"slotType": item.get("slotType", "")})
+        else:
+            player_item_id = item.get("playerItemId")
+            if player_item_id is None:
+                self.inventory_action_status.setText("物品记录缺少 playerItemId，不能安全提交装备操作。")
+                return
+            self.request_social_api("equip", "/equipment/equip", "POST",
+                                    {"playerItemId": player_item_id})
+
+    def set_combat_mode(self) -> None:
+        if self.ws is None or not self.world_ready or self.server_dead:
+            self.mode_status.setText("请先连接并进入游戏世界。")
+            return
+        value = int(self.combat_mode.currentData())
+        if self.current_map == 1:
+            self.mode_status.setText("需要先离开主城，服务端才允许切换和平/战斗/仇杀模式。")
+            return
+        try:
+            self.send_game_packet({"action": "mode", "mode": value})
+            self.mode_status.setText("模式请求已发送；以服务端下一次角色快照为准。主城或冷却期间可能被拒绝。")
+        except Exception as exc:
+            self.mode_status.setText(f"模式请求失败：{type(exc).__name__}: {exc}")
+
+    def update_mode_control(self, cooldown: int = 0) -> None:
+        if not hasattr(self, "set_mode_button"):
+            return
+        ready = (self.ws is not None and self.world_ready and not self.server_dead
+                 and self.current_map not in (None, 1) and cooldown <= 0)
+        self.set_mode_button.setEnabled(ready)
+        if self.current_map == 1:
+            self.set_mode_button.setToolTip("离开主城后可更改模式")
+        elif cooldown > 0:
+            self.set_mode_button.setToolTip(f"模式冷却中：{cooldown} 秒")
+        else:
+            self.set_mode_button.setToolTip("向服务端请求切换角色模式")
+
+    def update_nearby_players(self, peers: object) -> None:
+        if not hasattr(self, "enemy_table"):
+            return
+        rows = peers if isinstance(peers, list) else []
+        self.enemy_table.setRowCount(len(rows))
+        mode_names = {0: "和平", 1: "战斗", 2: "仇杀"}
+        for row, peer in enumerate(rows):
+            if not isinstance(peer, dict):
+                continue
+            name = str(peer.get("playerName", peer.get("name", f"玩家 {peer.get('id', '?')}")))
+            mode = int(peer.get("combatMode", 2 if peer.get("mode") else 0) or 0)
+            health = peer.get("health", "—")
+            maximum = peer.get("maxHealth", peer.get("maximumHealth", "—"))
+            for col, value in enumerate((name, mode_names.get(mode, "未知"), f"{health}/{maximum}")):
+                self.enemy_table.setItem(row, col, QTableWidgetItem(value))
+
+    def append_social_chat(self, messages: object, channel: str = "世界") -> None:
+        if not hasattr(self, "social_chat_log"):
+            return
+        if isinstance(messages, dict):
+            messages = [messages]
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            sender = message.get("Sender", message.get("sender", "系统"))
+            body = message.get("Body", message.get("message", message.get("body", "")))
+            if body:
+                self.social_chat_log.appendPlainText(f"[{channel}] {sender}：{body}")
+
+    def send_chat_message(self) -> None:
+        message = self.social_chat_input.text().strip()
+        if not message:
+            return
+        if self.ws is None or not self.world_ready:
+            self.mode_status.setText("聊天发送失败：请先连接游戏。")
+            return
+        try:
+            self.send_game_packet({"action": "chat", "channel": "world", "message": message})
+            self.social_chat_input.clear()
+            self.social_chat_log.appendPlainText(f"[我] {message}")
+        except Exception as exc:
+            self.mode_status.setText(f"聊天发送失败：{type(exc).__name__}: {exc}")
 
     def update_backpack(self) -> None:
         if not hasattr(self, "backpack_table"):
@@ -2534,11 +3135,11 @@ class MainWindow(QMainWindow):
                 slot = str(item.get("slotType", "—"))
                 quality = str(item.get("qualityCode", "—"))
                 rows.append([localized_item_name(item), SLOT_NAMES_ZH.get(slot.upper(), slot),
-                             QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1)), quality])
+                             QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1)), quality, item])
         for key, name in (("healthPotions", "生命药水"), ("bossTickets", "遗迹入场券"), ("atonementStones", "赎罪石")):
             count = self.last_self_state.get(key)
             if isinstance(count, (int, float)) and count > 0:
-                rows.append([name, "消耗品", "—", str(int(count)), ""])
+                rows.append([name, "消耗品", "—", str(int(count)), "", None])
         self.backpack_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
             quality = values[4]
@@ -2547,8 +3148,32 @@ class MainWindow(QMainWindow):
                 cell = QTableWidgetItem(value)
                 if col in (0, 2) and quality:
                     cell.setForeground(color)
+                if col == 0 and isinstance(values[5], dict):
+                    cell.setData(Qt.ItemDataRole.UserRole, values[5])
                 self.backpack_table.setItem(row, col, cell)
         self.backpack_status.setText(f"背包 {len(rows)} 类物品 · 已穿戴装备见角色面板" if "items" in self.api_equipment else "等待服务端背包数据…")
+        self.update_backpack_action()
+
+    def update_backpack_action(self) -> None:
+        if not hasattr(self, "backpack_equip_button"):
+            return
+        row = self.backpack_table.currentRow()
+        cell = self.backpack_table.item(row, 0) if row >= 0 else None
+        item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        self.backpack_equip_button.setEnabled(isinstance(item, dict))
+
+    def equip_backpack_selection(self) -> None:
+        row = self.backpack_table.currentRow()
+        cell = self.backpack_table.item(row, 0) if row >= 0 else None
+        item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        if not isinstance(item, dict) or item.get("equipped"):
+            return
+        player_item_id = item.get("playerItemId")
+        if player_item_id is None:
+            self.backpack_status.setText("物品记录缺少 playerItemId，无法安全装备。")
+            return
+        self.request_social_api("equip", "/equipment/equip", "POST", {"playerItemId": player_item_id})
+        self.backpack_status.setText("装备请求已发送，等待服务端确认…")
 
     def update_monsters(self, packet: dict) -> None:
         rows = packet.get("monsters", [])
@@ -2570,6 +3195,7 @@ class MainWindow(QMainWindow):
                 self.append_log(f"发现怪物：{localized_monster_name(merged)} · {encounter_id[:8]} · 地图 {merged.get('mapId', '?')}")
         self.monsters = cache
         self.refresh_monster_table()
+        self.update_live_telemetry()
 
     def refresh_monster_table(self) -> None:
         selected = self.selected_monster_id()
@@ -2579,6 +3205,17 @@ class MainWindow(QMainWindow):
         visible.sort(key=lambda item: self.monster_distance(item[1]))
         self.monster_table.blockSignals(True)
         self.monster_table.setRowCount(len(visible))
+        if hasattr(self, "monster_empty_state"):
+            has_monsters = bool(visible)
+            self.monster_empty_state.setVisible(not has_monsters)
+            self.monster_table.setVisible(has_monsters)
+            if not has_monsters:
+                if not self.world_ready:
+                    self.monster_empty_title.setText("等待怪物数据")
+                    self.monster_empty_detail.setText("连接游戏后会列出当前地图发现的存活怪物。")
+                else:
+                    self.monster_empty_title.setText("当前地图暂未发现存活怪物")
+                    self.monster_empty_detail.setText("怪物出现后会自动显示在这里；自动战斗开启时会继续搜索。")
         selected_row = None
         for index, (encounter_id, monster) in enumerate(visible):
             hp = monster.get("health", "?")
@@ -2935,7 +3572,12 @@ class MainWindow(QMainWindow):
             self.keepalive.stop()
             return
         try:
-            self.send_game_packet({"action": "ping", "sentAt": int(time.monotonic() * 1000)}, log=False)
+            sent_at = int(time.monotonic() * 1000)
+            self.pending_pings[sent_at] = time.monotonic()
+            # Bound stale entries if a server or proxy does not answer pings.
+            if len(self.pending_pings) > 8:
+                self.pending_pings.pop(next(iter(self.pending_pings)), None)
+            self.send_game_packet({"action": "ping", "sentAt": sent_at}, log=False)
         except Exception as exc:
             self.append_log(f"心跳发送失败：{type(exc).__name__}: {exc}")
             self.keepalive.stop()

@@ -15,8 +15,8 @@ sys.path.insert(0, str(BASE_DIR / 'game_client'))
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                              QHBoxLayout, QLabel, QPushButton, QTabWidget,
-                              QDialog)
+                              QHBoxLayout, QGridLayout, QLabel, QPushButton,
+                              QStackedWidget, QButtonGroup, QDialog)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from wss_tester import MainWindow as GameWindow
@@ -48,33 +48,83 @@ class DesktopWindow(QMainWindow):
         self.game = GameWindow()
         # Keep the game controller alive while hosting its existing widget.
         content = self.game.takeCentralWidget()
-        self.setStyleSheet(self.game.styleSheet())
+        self.setStyleSheet(self.game.styleSheet() + """
+            QLabel#appBrand { color: #E8ECEB; font-size: 15px; font-weight: 700; }
+            QLabel#shellStatus { color: #AAB4B1; font-size: 12px; }
+            QLabel#connectionDot { border-radius: 5px; }
+            QPushButton#shellNav { min-height: 40px; padding: 4px 16px; border-radius: 0;
+                                   color: #AAB4B1; background: transparent; border: 0;
+                                   border-bottom: 2px solid transparent; }
+            QPushButton#shellNav:hover { color: #E8ECEB; background: #222627; border-bottom: 2px solid #535A56; }
+            QPushButton#shellNav:checked { color: #DDE8D9; background: transparent; border: 0;
+                                           border-bottom: 2px solid #78936B; }
+        """)
         root = QWidget()
         root.setObjectName('root')
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 8, 12, 12)
-        top = QHBoxLayout()
-        top.addWidget(QLabel('TABBY  /  游戏与商城'))
-        top.addStretch()
-        self.account_status = QLabel('未设置 Token')
-        top.addWidget(self.account_status)
+        layout.setContentsMargins(20, 8, 20, 12)
+        layout.setSpacing(8)
+        top = QGridLayout()
+        top.setContentsMargins(2, 0, 2, 6)
+        top.setHorizontalSpacing(12)
+        brand = QLabel('TABBY  /  游戏与商城')
+        brand.setObjectName('appBrand')
+        top.addWidget(brand, 0, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        top.setColumnStretch(0, 1)
+
+        nav = QWidget()
+        nav_layout = QHBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+        self.tabs = QStackedWidget()
+        self.tabs.setObjectName('appPages')
+        self.game_nav = QPushButton('游戏控制台')
+        self.shop_nav = QPushButton('商城与监控')
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        for button in (self.game_nav, self.shop_nav):
+            button.setObjectName('shellNav')
+            button.setCheckable(True)
+            self.nav_group.addButton(button)
+            nav_layout.addWidget(button)
+        self.game_nav.setChecked(True)
+        self.game_nav.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
+        self.shop_nav.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        top.addWidget(nav, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        top.setColumnStretch(2, 1)
+
+        actions = QWidget()
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(12)
+        self.connection_dot = QLabel()
+        self.connection_dot.setObjectName('connectionDot')
+        self.connection_dot.setFixedSize(10, 10)
+        actions_layout.addWidget(self.connection_dot)
+        self.account_status = QLabel('未连接 · 未设置 Token')
+        self.account_status.setObjectName('shellStatus')
+        actions_layout.addWidget(self.account_status)
         account = QPushButton('账号连接')
-        account.setObjectName('quietButton')
+        account.setObjectName('secondaryButton')
         account.clicked.connect(self.show_account)
-        top.addWidget(account)
+        actions_layout.addWidget(account)
+        top.addWidget(actions, 0, 2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(top)
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.tabBar().setDrawBase(False)
-        self.tabs.addTab(content, '游戏控制台')
+        self.tabs.addWidget(content)
         self.shop_container = QWidget()
         self.shop_layout = QVBoxLayout(self.shop_container)
         self.shop_layout.setContentsMargins(0, 0, 0, 0)
-        self.tabs.addTab(self.shop_container, '商城与监控')
+        self.tabs.addWidget(self.shop_container)
         self.tabs.currentChanged.connect(self.activate_tab)
+        self.tabs.currentChanged.connect(self.update_navigation)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
         self.game.account_toggle.hide()
+        # The desktop shell owns the title and connection summary; don't stack
+        # another dashboard title row inside the game page.
+        self.game.dashboard_header.hide()
+        self.game.on_state_change = self.update_shell_status
+        self.game.on_latency_change = self.update_shell_latency
         self.game.token.textChanged.connect(self.set_token)
         self.account_dialog = QDialog(self)
         self.account_dialog.setWindowTitle('统一账号连接')
@@ -140,8 +190,39 @@ class DesktopWindow(QMainWindow):
     def set_token(self, value):
         value = value.strip()
         self._token = value[7:].strip() if value.lower().startswith('bearer ') else value
-        self.account_status.setText('Token 已设置' if self._token else '未设置 Token')
+        self.update_shell_status(self.game.status.text())
         self.sync_shop_token()
+
+    def update_shell_status(self, connection_state=None):
+        state = connection_state or self.game.status.text()
+        token_state = 'Token 已设置' if self._token else '未设置 Token'
+        latency = self.game.last_rtt_ms
+        if state == '已连接' and latency is not None:
+            self.account_status.setText(f'{state} · {latency} ms · {token_state}')
+            if latency <= 120:
+                color, quality = '#43c98b', '延迟低'
+            elif latency <= 250:
+                color, quality = '#e6bf55', '延迟偏高'
+            else:
+                color, quality = '#ef8d43', '延迟高'
+        elif state in ('连接中…', '连接中'):
+            color, quality = '#e6bf55', '正在连接'
+            self.account_status.setText(f'{state} · {token_state}')
+        elif state == '已连接':
+            color, quality = '#e6bf55', '等待延迟数据'
+            self.account_status.setText(f'{state} · 等待延迟 · {token_state}')
+        else:
+            color, quality = '#e05e5a', '已掉线'
+            self.account_status.setText(f'{state} · {token_state}')
+        self.connection_dot.setStyleSheet(f'background:{color}; border-radius:5px;')
+        self.connection_dot.setToolTip(f'{quality}' + (f'：{latency} ms' if state == '已连接' and latency is not None else ''))
+
+    def update_shell_latency(self):
+        self.update_shell_status(self.game.status.text())
+
+    def update_navigation(self, index):
+        self.game_nav.setChecked(index == 0)
+        self.shop_nav.setChecked(index == 1)
 
     def sync_shop_token(self):
         if self.web is None or not self._loaded:

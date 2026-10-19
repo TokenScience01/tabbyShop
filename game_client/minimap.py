@@ -26,15 +26,15 @@ class TacticalMap(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor('#1a1e19'))
+        p.fillRect(self.rect(), QColor('#191D1E'))
         o = self.owner
-        p.setPen(QColor('#252c23'))
+        p.setPen(QColor('#303635'))
         for x in range(0, self.width(), 32):
             p.drawLine(x, 0, x, self.height())
         for y in range(0, self.height(), 32):
             p.drawLine(0, y, self.width(), y)
         if o.current_map is None or o.world_x is None or o.world_y is None:
-            p.setPen(QColor('#a2ad99'))
+            p.setPen(QColor('#AAB4B1'))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '连接后显示实时地图')
             return
         monsters = [m for m in o.monsters.values() if m.get('mapId') == o.current_map
@@ -60,18 +60,18 @@ class TacticalMap(QWidget):
             p.save()
             p.translate(ox-bounds.left()*sx, oy-bounds.top()*sy)
             p.scale(sx, sy)
-            p.fillPath(terrain, QColor('#343e2e'))
+            p.fillPath(terrain, QColor('#29392C'))
             p.restore()
         route = o.chase_route or o.route_points
         if route:
             path = QPainterPath(point(o.world_x,o.world_y))
             for x,y in route:
                 path.lineTo(point(x,y))
-            p.setPen(QPen(QColor('#afc69e'), 2, Qt.PenStyle.DashLine))
+            p.setPen(QPen(QColor('#8BA779'), 2, Qt.PenStyle.DashLine))
             p.drawPath(path)
         for dest,(x,y) in portals:
             pos = point(x,y)
-            p.setPen(QPen(QColor('#9cacae'),2));p.setBrush(QColor('#29352d'))
+            p.setPen(QPen(QColor('#AFA27E'),2));p.setBrush(QColor('#302A25'))
             p.drawRoundedRect(QRectF(pos.x()-5,pos.y()-5,10,10),2,2)
             # Keep labels inside the canvas even for portals on its edges.
             tx = min(self.width()-18, max(4, pos.x()+8))
@@ -79,9 +79,9 @@ class TacticalMap(QWidget):
             p.drawText(QPointF(tx,ty),str(dest))
         for m in monsters:
             elite = str(m.get('monsterRank','')).upper() == 'ELITE'
-            p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#cfb77b' if elite else '#c78f86'))
+            p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#e8ba67' if elite else '#e47782'))
             p.drawEllipse(point(m['x'],m['y']),4 if elite else 2.8,4 if elite else 2.8)
         pos=point(o.world_x,o.world_y)
-        p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#45543c'));p.drawEllipse(pos,12,12)
-        p.setBrush(QColor('#b5d09e' if not o.server_dead else '#c78f86'));p.drawEllipse(pos,5,5)
-        p.setPen(QColor('#e0e5d7'));p.drawText(pos+QPointF(12,-10),'你*' if o.position_estimated else '你')
+        p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#43583E'));p.drawEllipse(pos,12,12)
+        p.setBrush(QColor('#A4C486' if not o.server_dead else '#e47782'));p.drawEllipse(pos,5,5)
+        p.setPen(QColor('#E8ECEB'));p.drawText(pos+QPointF(12,-10),'你*' if o.position_estimated else '你')
