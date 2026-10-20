@@ -17,7 +17,7 @@ OWNER = "TokenScience01"
 REPOSITORY = "tabbyShop"
 RELEASES_API = f"https://api.github.com/repos/{OWNER}/{REPOSITORY}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{OWNER}/{REPOSITORY}/releases/latest"
-APP_VERSION = "1.2.11"
+APP_VERSION = "1.2.12"
 ASSET_NAME = "TabbyDesktop-windows-x64.zip"
 
 
