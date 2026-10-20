@@ -28,7 +28,7 @@ from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from PySide6.QtWebChannel import QWebChannel
-from wss_tester import MainWindow as GameWindow
+from wss_tester import MAP_NAMES, MainWindow as GameWindow
 import server as shop
 
 
@@ -90,6 +90,10 @@ class LocalShopPage(QWebEnginePage):
 
 
 class DesktopWindow(QMainWindow):
+    SESSION_BUSY_STATES = frozenset({
+        '已连接', '连接中', '连接中…', '本机签名登录中…', '正在读取角色资料…',
+    })
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Tabby · 游戏与商城')
@@ -106,11 +110,14 @@ class DesktopWindow(QMainWindow):
         self._profile_path = None
         self._profile_lock = threading.RLock()
         self._game_sessions = {}
+        self._account_last_maps = {}
         self._game_session_widgets = {}
         self._game_address_by_bridge = {}
         self._session_tokens = {}
         self._batch_login_queue = []
-        self._batch_login_inflight = ''
+        self._batch_login_inflight = set()
+        self._batch_login_active = False
+        self._batch_login_max_concurrency = 3
         self._batch_login_attempted = 0
         self._batch_login_failed = 0
         self._batch_login_return_tab = 0
@@ -138,9 +145,10 @@ class DesktopWindow(QMainWindow):
             QFrame#walletAccountRow { background: #1B2020; border: 1px solid #343B39; border-radius: 10px; }
             QFrame#walletAccountRow:hover { border-color: #687B65; background: #202626; }
             QLabel#walletAddress { color: #E8ECEB; font-family: Consolas; font-size: 12px; }
-            QPushButton#walletCopyAddress { min-height:26px; padding:3px 9px; color:#B7DFAE;
-                background:#202725; border:1px solid #46534C; border-radius:6px; font-size:11px; }
-            QPushButton#walletCopyAddress:hover { background:#29332E; border-color:#78936B; }
+            QPushButton#walletCopyAddress { min-height:0; max-height:28px; padding:4px 8px; color:#A9C99F;
+                background:transparent; border:0; border-radius:7px; font-size:11px; font-weight:600; }
+            QPushButton#walletCopyAddress:hover { color:#DDE8D9; background:#29332E; }
+            QPushButton#walletCopyAddress:pressed { background:#34443A; }
             QLabel#walletAccountState { color: #8E9994; font-size: 10px; }
             QLabel#walletAccountDetails { color: #C5CECA; font-size: 11px; }
             QLabel#walletStatusDot { border-radius: 5px; }
@@ -553,8 +561,8 @@ class DesktopWindow(QMainWindow):
             box.blockSignals(False)
 
     def batch_connect_accounts(self):
-        """Connect selected saved wallets one at a time using the shared unlock."""
-        if self._batch_login_inflight or self._batch_login_queue:
+        """Start up to three selected wallet logins concurrently in background workers."""
+        if self._batch_login_active:
             self.planner_status.setText('批量上线正在进行中，请等待当前账号完成签名登录。')
             return
         if shop.MONITOR.buy_lock.locked():
@@ -569,7 +577,7 @@ class DesktopWindow(QMainWindow):
         for address in selected:
             session = self._game_sessions.get(address.lower())
             state = session.status.text() if session else ''
-            if state not in ('已连接', '连接中', '连接中…'):
+            if state not in self.SESSION_BUSY_STATES:
                 queue.append(address)
         if not queue:
             self.planner_status.setText('所选账号都已在线或正在连接。')
@@ -581,67 +589,72 @@ class DesktopWindow(QMainWindow):
         if not phrase:
             self.planner_status.setText('已取消批量上线；需要先解锁钱包保险库。')
             return
-        try:
-            # Validate the shared password before starting any login attempts.
-            self.game.credential_vault.load_wallet(phrase, queue[0])
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, '无法解锁钱包', f'批量上线已取消：{exc}')
-            return
-
         self.cache_shared_passphrase(phrase)
         self._batch_login_queue = queue
+        self._batch_login_inflight.clear()
+        self._batch_login_active = True
         self._batch_login_attempted = 0
         self._batch_login_failed = 0
         self._batch_login_return_tab = self.tabs.currentIndex()
         self.planner_batch_connect.setEnabled(False)
-        self.planner_status.setText(f'正在逐个上线 {len(queue)} 个账号；每个签名完成后继续下一个。')
+        self.planner_status.setText(
+            f'正在后台并发上线 {len(queue)} 个账号（最多同时 {self._batch_login_max_concurrency} 个）；'
+            '界面仍可继续操作。')
         self._continue_batch_login()
 
     def _continue_batch_login(self):
-        if not self._batch_login_queue:
-            if not self._batch_login_attempted:
-                self._batch_login_inflight = ''
-                self.planner_batch_connect.setEnabled(True)
-                self.planner_status.setText('所选账号都已上线或正在连接。')
-                return
-            message = (f'批量上线已发起 {self._batch_login_attempted} 个账号；'
-                       f'签名失败 {self._batch_login_failed} 个，请看账号状态点确认在线情况。')
-            self.planner_status.setText(message)
-            self.refresh_account_rows()
-            self._batch_login_inflight = ''
+        if not self._batch_login_active:
+            return
+        while (self._batch_login_queue and
+               len(self._batch_login_inflight) < self._batch_login_max_concurrency):
+            address = self._batch_login_queue.pop(0)
+            session = self._game_sessions.get(address.lower())
+            state = session.status.text() if session else ''
+            if state in self.SESSION_BUSY_STATES:
+                continue
+            self._batch_login_inflight.add(address.lower())
+            self.planner_status.setText(
+                f'后台批量上线：已启动 {self._batch_login_attempted + len(self._batch_login_inflight)} / '
+                f'{self._batch_login_attempted + len(self._batch_login_inflight) + len(self._batch_login_queue)} '
+                f'个账号（尾号 {address[-3:]}）')
+            self.connect_account(address, background=True)
+            QTimer.singleShot(60000, lambda expected=address.lower(): self._batch_login_timeout(expected))
+
+        if self._batch_login_queue:
+            return
+        if self._batch_login_inflight:
+            return
+        if not self._batch_login_attempted:
+            self._batch_login_active = False
             self.planner_batch_connect.setEnabled(True)
-            self.tabs.setCurrentIndex(self._batch_login_return_tab)
+            self.planner_status.setText('所选账号都已上线或正在连接。')
             return
-        address = self._batch_login_queue.pop(0)
-        session = self._game_sessions.get(address.lower())
-        state = session.status.text() if session else ''
-        if state in ('已连接', '连接中', '连接中…'):
-            QTimer.singleShot(0, self._continue_batch_login)
-            return
-        self._batch_login_inflight = address.lower()
-        self.planner_status.setText(
-            f'批量上线中：{self._batch_login_attempted + 1} / '
-            f'{self._batch_login_attempted + len(self._batch_login_queue) + 1} · {address[-3:]}')
-        self.connect_account(address)
-        QTimer.singleShot(60000, lambda expected=address.lower(): self._batch_login_timeout(expected))
+        message = (f'批量上线已发起 {self._batch_login_attempted} 个账号；'
+                   f'签名失败 {self._batch_login_failed} 个，请看账号状态点确认在线情况。')
+        self.planner_status.setText(message)
+        self.refresh_account_rows()
+        self._batch_login_active = False
+        self.planner_batch_connect.setEnabled(True)
+        self.tabs.setCurrentIndex(self._batch_login_return_tab)
 
     def _batch_login_timeout(self, expected_address):
-        if self._batch_login_inflight != expected_address:
+        if expected_address not in self._batch_login_inflight:
             return
-        self._batch_login_inflight = ''
+        self._batch_login_inflight.discard(expected_address)
         self._batch_login_attempted += 1
         self._batch_login_failed += 1
-        self.planner_status.setText(f'账号尾号 {expected_address[-3:]} 登录等待超时，继续下一个账号。')
-        QTimer.singleShot(0, self._continue_batch_login)
+        self.planner_status.setText(f'账号尾号 {expected_address[-3:]} 登录等待超时；其他账号继续登录。')
+        self._continue_batch_login()
 
     def _finish_batch_login_result(self, address, result):
-        if not self._batch_login_inflight or str(address).lower() != self._batch_login_inflight:
+        normalized = str(address).lower()
+        if normalized not in self._batch_login_inflight:
             return
         self._batch_login_attempted += 1
         if not (isinstance(result, dict) and result.get('ok') and result.get('token')):
             self._batch_login_failed += 1
-        self._batch_login_inflight = ''
-        QTimer.singleShot(250, self._continue_batch_login)
+        self._batch_login_inflight.discard(normalized)
+        self._continue_batch_login()
 
     def update_planner_select_all(self, *_args):
         boxes = list(self.planner_account_checks.values())
@@ -724,12 +737,15 @@ class DesktopWindow(QMainWindow):
         disconnected = 0
         already_offline = 0
         # Cancel any not-yet-started batch logins so the offline action remains final.
-        if self._batch_login_queue or self._batch_login_inflight:
+        if self._batch_login_active:
             self._batch_login_queue = [address for address in self._batch_login_queue
                                        if address.lower() not in selected_ids]
-            if self._batch_login_inflight in selected_ids:
-                self._batch_login_inflight = ''
-            self.planner_batch_connect.setEnabled(not self._batch_login_queue)
+            for address in selected_ids:
+                if address in self._batch_login_inflight:
+                    self._batch_login_inflight.discard(address)
+                    self._batch_login_attempted += 1
+                    self._batch_login_failed += 1
+            self.planner_batch_connect.setEnabled(not self._batch_login_active)
 
         for address in selected:
             game = self._game_sessions.get(address.lower())
@@ -744,7 +760,7 @@ class DesktopWindow(QMainWindow):
             game.pending_portal = None
             game.route_points = []
             game.update_map_buttons()
-            if game.ws is not None or game.status.text() in ('已连接', '连接中', '连接中…'):
+            if game.ws is not None or game.status.text() in self.SESSION_BUSY_STATES:
                 if address.lower() == self.active_address.lower():
                     shop.MONITOR.stop()
                 game.disconnect_ws()
@@ -756,6 +772,8 @@ class DesktopWindow(QMainWindow):
         self.planner_status.setText(
             f'已批量下线 {disconnected} 个账号' +
             (f'；{already_offline} 个本来就离线' if already_offline else '') + '。')
+        if self._batch_login_active:
+            self._continue_batch_login()
 
     def load_shop_profiles(self):
         try:
@@ -821,11 +839,11 @@ class DesktopWindow(QMainWindow):
             address_row.addWidget(address_label, 1)
             copy_address = QPushButton('复制地址')
             copy_address.setObjectName('walletCopyAddress')
+            copy_address.setFixedSize(96, 30)
             copy_address.setToolTip('复制完整钱包地址')
             copy_address.clicked.connect(
                 lambda _checked=False, wallet=address, button=copy_address:
                 self.copy_wallet_address(wallet, button))
-            address_row.addWidget(copy_address, 0, Qt.AlignmentFlag.AlignVCenter)
             identity.addLayout(address_row)
             is_active = address.lower() == self.active_address.lower()
             session = self._game_sessions.get(address.lower())
@@ -833,7 +851,7 @@ class DesktopWindow(QMainWindow):
             if session_state == '已连接':
                 dot_color = '#43C98B'
                 state_text = '在线' + (' · 当前显示' if is_active else ' · 后台保持连接')
-            elif session_state in ('连接中…', '连接中'):
+            elif session_state in self.SESSION_BUSY_STATES:
                 dot_color = '#E6BF55'
                 state_text = '连接中' + (' · 当前显示' if is_active else ' · 后台连接中')
             else:
@@ -844,13 +862,13 @@ class DesktopWindow(QMainWindow):
             state_label = QLabel(state_text)
             state_label.setObjectName('walletAccountState')
             identity.addWidget(state_label)
-            details = self.account_summary(session)
+            details = self.account_summary(session, self._account_last_maps.get(address.lower()))
             details_label = QLabel(details or ('角色资料将在登录后显示' if session else '尚未登录'))
             details_label.setObjectName('walletAccountDetails')
             details_label.setWordWrap(True)
             identity.addWidget(details_label)
             row_layout.addLayout(identity, 1)
-            if session_state in ('连接中…', '连接中'):
+            if session_state in self.SESSION_BUSY_STATES - {'已连接'}:
                 action_text = '连接中…'
             elif is_active and session_state == '已连接':
                 action_text = '查看控制台'
@@ -863,7 +881,7 @@ class DesktopWindow(QMainWindow):
             action = QPushButton(action_text)
             action.setObjectName('secondaryButton' if is_active else 'primaryButton')
             action.setMinimumHeight(38)
-            action.setEnabled(session_state not in ('连接中…', '连接中'))
+            action.setEnabled(session_state not in self.SESSION_BUSY_STATES - {'已连接'})
             if not is_active and session_state == '已连接':
                 action.setToolTip('只切换当前控制台；这个账号和其他账号的游戏连接都会保持在线。')
             elif not is_active:
@@ -873,7 +891,12 @@ class DesktopWindow(QMainWindow):
             else:
                 action.setToolTip('重新连接当前账号；其他账号连接保持不变。')
             action.clicked.connect(lambda _checked=False, wallet=address: self.connect_account(wallet))
-            row_layout.addWidget(action)
+            actions = QVBoxLayout()
+            actions.setContentsMargins(0, 0, 0, 0)
+            actions.setSpacing(7)
+            actions.addWidget(copy_address, 0, Qt.AlignmentFlag.AlignRight)
+            actions.addWidget(action)
+            row_layout.addLayout(actions)
             self.account_rows.addWidget(row)
         self.account_rows.addStretch(1)
 
@@ -898,7 +921,7 @@ class DesktopWindow(QMainWindow):
             QTimer.singleShot(1200, restore_label)
 
     @staticmethod
-    def account_summary(game):
+    def account_summary(game, last_known_map=None):
         if game is None:
             return ''
         profile = getattr(game, 'api_profile', {})
@@ -925,6 +948,16 @@ class DesktopWindow(QMainWindow):
         if defense is None:
             defense = self_state.get('defense')
         parts = []
+        current_map = getattr(game, 'current_map', None)
+        if current_map is None:
+            current_map = last_known_map
+        if current_map is not None:
+            try:
+                map_id = int(current_map)
+            except (TypeError, ValueError):
+                map_id = current_map
+            map_name = MAP_NAMES.get(map_id, f'地图 {map_id}')
+            parts.append(f'地图 {map_name.split(" · ")[-1]}')
         if name and str(name) != '—':
             parts.append(str(name))
         if level and str(level) != '—':
@@ -1073,7 +1106,7 @@ class DesktopWindow(QMainWindow):
         self.refresh_account_rows()
         QMessageBox.information(self, '导入完成', f'已加密保存 {len(validated)} 个新钱包，可在列表中逐个连接。')
 
-    def connect_account(self, address):
+    def connect_account(self, address, background=False):
         normalized = address.lower()
         same_active = normalized == self.active_address.lower()
         if shop.MONITOR.buy_lock.locked():
@@ -1081,7 +1114,7 @@ class DesktopWindow(QMainWindow):
             self.tabs.setCurrentIndex(2)
             return
         switching = bool(self.active_address and not same_active)
-        if switching:
+        if switching and not background:
             self.save_active_shop_profile()
             # The game socket remains alive in its own GameWindow. The shop
             # monitor is a singleton and must be rebound to the selected
@@ -1130,36 +1163,49 @@ class DesktopWindow(QMainWindow):
                     if self.game is instance else None)
             self._game_sessions[normalized] = game
             self._game_session_widgets[normalized] = widget
+            game.on_map_change = lambda map_id, wallet=address: self.on_account_map_change(wallet, map_id)
             self._game_address_by_bridge[id(game.bridge)] = address
         else:
             widget = self._game_session_widgets.get(normalized)
         if game is None or widget is None:
             QMessageBox.warning(self, '账号控制台错误', '无法打开这个账号的游戏控制台。')
             return
-        self.game = game
-        game._batch_login_silent = self._batch_login_inflight == normalized
-        self.game_stack.setCurrentWidget(widget)
-        if self.game.character_creation_required:
-            QTimer.singleShot(0, self.game.maybe_prompt_character_creation)
-        self.active_address = address
-        self._pending_address = address
-        self.game._vault_passphrase = self._master_passphrase or self.game._vault_passphrase
-        index = self.game.saved_wallet.findData(address)
+        if not background:
+            self.game = game
+            self.game_stack.setCurrentWidget(widget)
+            if game.character_creation_required:
+                QTimer.singleShot(0, game.maybe_prompt_character_creation)
+            self.active_address = address
+            self._pending_address = address
+        else:
+            # Background batch sign-ins must not open a character-creation
+            # dialog over the account manager; it can be handled when shown.
+            game.can_prompt_character_creation = (
+                lambda instance=game, wallet=address:
+                self.game is instance and self.active_address.lower() == wallet.lower())
+        game._batch_login_silent = background or normalized in self._batch_login_inflight
+        game._vault_passphrase = self._master_passphrase or game._vault_passphrase
+        index = game.saved_wallet.findData(address)
         if index >= 0:
-            self.game.saved_wallet.setCurrentIndex(index)
-        self.game.auth_method.setCurrentIndex(self.game.auth_method.findData('private_key'))
-        if not self.game.remember_private_key.isChecked():
-            self.game.remember_private_key.setChecked(True)
+            game.saved_wallet.setCurrentIndex(index)
+        game.auth_method.setCurrentIndex(game.auth_method.findData('private_key'))
+        if not game.remember_private_key.isChecked():
+            game.remember_private_key.setChecked(True)
+        if background:
+            if game.status.text() not in self.SESSION_BUSY_STATES:
+                game.connect_ws()
+            self.refresh_account_rows()
+            return
         if not same_active:
             shop.MONITOR.stop()
             shop.MONITOR.configure(self._shop_profiles.get(address.lower(), shop.DEFAULT_CONFIG))
-        shop.MONITOR.event_callback = self.game.bridge.shop_notification.emit
+        shop.MONITOR.event_callback = game.bridge.shop_notification.emit
         self._token = self._session_tokens.get(normalized, '')
         self._active_private_key = ''
         self.prepare_shop_account_context(address)
         self.tabs.setCurrentIndex(1)
-        if self.game.status.text() not in ('已连接', '连接中', '连接中…'):
-            self.game.connect_ws()
+        if game.status.text() not in self.SESSION_BUSY_STATES:
+            game.connect_ws()
         self.refresh_account_rows()
 
     def on_session_token_changed(self, game, value):
@@ -1178,6 +1224,11 @@ class DesktopWindow(QMainWindow):
     def on_game_metadata(self, game):
         if game in self._game_sessions.values():
             self.refresh_account_rows()
+
+    def on_account_map_change(self, address, map_id):
+        if map_id is not None:
+            self._account_last_maps[str(address).lower()] = map_id
+        self.refresh_account_rows()
 
     def prepare_shop_account_context(self, address):
         if not self.web:

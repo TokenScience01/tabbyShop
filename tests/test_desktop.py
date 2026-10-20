@@ -136,6 +136,26 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('金币 1,234.50', summary)
         self.assertIn('TABBY 6,305.93', summary)
 
+    def test_account_summary_shows_current_map(self):
+        game = type('GameSummary', (), {})()
+        game.api_profile = {'playerName': 'Hero'}
+        game.last_progress_state = {}
+        game.api_equipment = {}
+        game.last_self_state = {}
+        game.character_facts = {}
+        game.current_map = 6
+        self.assertIn('地图 南部森林', DesktopWindow.account_summary(game))
+        game.current_map = None
+        self.assertIn('地图 南部森林', DesktopWindow.account_summary(game, 6))
+
+    def test_current_map_change_notifies_account_center(self):
+        game = self.window.game
+        changes = []
+        game.on_map_change = changes.append
+        game.set_current_map(6)
+        game.set_current_map(6)
+        self.assertEqual(changes, [6])
+
     def test_auto_equip_uses_weighted_total_for_mixed_stat_upgrades(self):
         game = self.window.game
         game.auto_equip_better.setChecked(True)
@@ -191,26 +211,64 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(approval['approved'])
         self.assertTrue(approval['event'].is_set())
 
-    def test_batch_online_connects_selected_wallets_sequentially(self):
-        addresses = ['0x' + 'a' * 37 + suffix for suffix in ('222', '111')]
+    def test_batch_online_starts_up_to_three_wallets_concurrently(self):
+        addresses = ['0x' + 'a' * 37 + suffix for suffix in ('444', '222', '111', '333')]
+        expected = [addresses[2], addresses[1], addresses[3], addresses[0]]
         vault = self.window.game.credential_vault
         with (patch.object(vault, 'list_wallets', return_value=addresses),
-              patch.object(vault, 'load_wallet', return_value='local-test-key'),
               patch.object(self.window, 'ask_shared_passphrase', return_value='shared123'),
               patch.object(self.window, 'connect_account') as connect,
               patch.object(QTimer, 'singleShot')):
             self.window.refresh_planner_accounts()
             self.window.set_all_planner_accounts(True)
             self.window.batch_connect_accounts()
-            self.assertEqual(connect.call_args.args[0], addresses[1])
+            self.assertEqual([call.args[0] for call in connect.call_args_list],
+                             expected[:3])
+            self.assertTrue(all(call.kwargs.get('background') for call in connect.call_args_list))
+            self.assertEqual(len(self.window._batch_login_inflight), 3)
             self.window._finish_batch_login_result(
-                addresses[1], {'ok': True, 'token': 'first-session'})
-            self.window._continue_batch_login()
-            self.assertEqual(connect.call_args.args[0], addresses[0])
+                expected[0], {'ok': True, 'token': 'first-session'})
+            self.assertEqual(connect.call_args_list[-1].args[0], expected[3])
             self.window._finish_batch_login_result(
-                addresses[0], {'ok': True, 'token': 'second-session'})
-            self.window._continue_batch_login()
-        self.assertIn('批量上线已发起 2 个账号', self.window.planner_status.text())
+                expected[1], {'ok': True, 'token': 'second-session'})
+            self.window._finish_batch_login_result(
+                expected[2], {'ok': True, 'token': 'third-session'})
+            self.window._finish_batch_login_result(
+                expected[3], {'ok': True, 'token': 'fourth-session'})
+        self.assertIn('批量上线已发起 4 个账号', self.window.planner_status.text())
+
+    def test_batch_login_does_not_enable_combat_automatically(self):
+        address = '0x' + 'a' * 37 + '111'
+        game = self.window.game
+        game.status.setText('离线')
+        self.window._game_sessions[address.lower()] = game
+        selected = QCheckBox()
+        selected.setChecked(True)
+        self.window.planner_account_checks = {address: selected}
+        with (patch.object(game.credential_vault, 'list_wallets', return_value=[address]),
+              patch.object(self.window, 'ask_shared_passphrase', return_value='shared123'),
+              patch.object(self.window, 'connect_account'),
+              patch.object(QTimer, 'singleShot')):
+            self.window.batch_connect_accounts()
+        self.assertFalse(game.auto_attack.isChecked())
+        self.assertTrue(self.window._batch_login_active)
+
+    def test_saved_wallet_decryption_is_started_in_background_worker(self):
+        game = self.window.game
+        address = '0x' + 'a' * 40
+        game.saved_wallet.addItem(address, address)
+        game.saved_wallet.setCurrentIndex(game.saved_wallet.findData(address))
+        game._vault_passphrase = 'shared123'
+        game.url.setText('wss://game.tabby.meme/api/realtime')
+        game.remember_private_key.setChecked(True)
+        with (patch.object(game.credential_vault, 'load_wallet') as load_wallet,
+              patch('game_client.wss_tester.threading.Thread') as worker,
+              patch.object(QMessageBox, 'warning') as warning):
+            game.start_signed_login()
+        load_wallet.assert_not_called()
+        worker.assert_called_once()
+        worker.return_value.start.assert_called_once_with()
+        warning.assert_not_called()
 
     def test_batch_offline_disconnects_selected_online_accounts(self):
         address = '0x' + 'a' * 37 + '111'
@@ -1254,6 +1312,23 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(game._reconnect_attempt, 9)
         self.assertEqual(game.reconnect_timer.interval(), 60000)
         game.reconnect_timer.stop()
+
+    def test_reconnect_world_ready_resumes_enabled_auto_combat(self):
+        game = self.window.game
+        game.auto_attack.setChecked(True)
+        game.current_map = 2
+        game.world_ready = False
+        game.ws = object()
+        with (patch.object(game, 'send_stationary_sync'),
+              patch.object(game, 'refresh_social_data')):
+            game.accept_packet({'type': 'snapshot', 'self': {}, 'monsters': []})
+        self.assertTrue(game.auto_attack.isChecked())
+        self.assertTrue(game.combat_timer.isActive())
+        game.ws = None
+        game.combat_timer.stop()
+        game.keepalive.stop()
+        game.telemetry_timer.stop()
+        game.position_sync_timer.stop()
 
     def test_rejected_token_stops_reconnecting_same_credential(self):
         game = self.window.game

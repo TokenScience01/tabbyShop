@@ -14,7 +14,7 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertEqual(updater.version_tuple('v2.10.3'), (2, 10, 3, 0))
         self.assertGreater(updater.version_tuple('1.2.10'), updater.version_tuple('1.2.9'))
         self.assertEqual(updater.version_tuple('1.2'), updater.version_tuple('1.2.0'))
-        self.assertEqual(updater.APP_VERSION, '1.2.15')
+        self.assertEqual(updater.APP_VERSION, '1.2.16')
 
     def test_update_script_logs_failures_and_restores_previous_install(self):
         install_dir = Path('C:/Users/test/App/TabbyDesktop')

@@ -508,6 +508,7 @@ class MainWindow(QMainWindow):
         self.credential_vault = CredentialVault()
         self._vault_passphrase: str | None = None
         self._batch_login_silent = False
+        self._login_generation = 0
         self.manual_disconnect = False
         self._auto_reconnect_login = False
         self._reconnect_attempt = 0
@@ -2179,16 +2180,10 @@ class MainWindow(QMainWindow):
                 vault_passphrase = self.ask_vault_passphrase(confirm=False)
                 if vault_passphrase is None:
                     return
-            try:
-                private_key = self.credential_vault.load_wallet(vault_passphrase, selected_wallet_address)
-                self._vault_passphrase = vault_passphrase
-                self.on_vault_unlocked(vault_passphrase)
-                self.bridge.keyring_status.emit(f"主密码验证成功；已解锁 {selected_wallet_address[:8]}…{selected_wallet_address[-6:]}。")
-            except (OSError, ValueError) as exc:
-                self._vault_passphrase = None
-                QMessageBox.warning(self, "无法解锁私钥", str(exc))
-                self.bridge.keyring_status.emit("解锁失败；请确认主密码或检查分片文件。")
-                return
+            # Decrypting the vault uses a deliberately expensive KDF. Keep it
+            # off the Qt event thread, especially when several accounts log in.
+            self._vault_passphrase = vault_passphrase
+            self.on_vault_unlocked(vault_passphrase)
         elif not private_key and self.credential_vault.list_wallets():
             QMessageBox.information(self, "选择钱包地址", "本机保存了多个钱包，请先选择要登录的钱包地址；也可以输入新的私钥。")
             return
@@ -2207,7 +2202,7 @@ class MainWindow(QMainWindow):
                 private_key = legacy_key
                 legacy_key = ""
                 self.bridge.keyring_status.emit("发现旧版保存项；成功登录后会迁移为主密码加密分片。")
-        if not private_key:
+        if not private_key and not selected_wallet_address:
             if self._auto_reconnect_login:
                 self._auto_reconnect_login = False
                 self.reconnect_timer.stop()
@@ -2226,6 +2221,8 @@ class MainWindow(QMainWindow):
         else:
             self._vault_passphrase = None
         self.private_key.clear()
+        self._login_generation += 1
+        login_generation = self._login_generation
         api_path = parsed.path.rstrip("/")
         if api_path.endswith("/realtime"):
             api_path = api_path[:-len("/realtime")]
@@ -2244,9 +2241,19 @@ class MainWindow(QMainWindow):
                 from eth_account import Account
                 from eth_account.messages import encode_defunct
 
+                if not key_material and selected_wallet_address:
+                    key_material = self.credential_vault.load_wallet(
+                        vault_passphrase, selected_wallet_address)
+                    if login_generation != self._login_generation:
+                        return
+                    self.bridge.keyring_status.emit(
+                        f"主密码验证成功；已解锁 {selected_wallet_address[:8]}…{selected_wallet_address[-6:]}。")
+
                 account = Account.from_key(key_material)
                 if selected_wallet_address and account.address.lower() != selected_wallet_address.lower():
                     raise RuntimeError("解锁出的私钥与所选钱包地址不匹配")
+                if login_generation != self._login_generation:
+                    return
 
                 def request(path: str, body: dict, bearer: str | None = None) -> dict:
                     # The membership API applies browser-origin validation.
@@ -2333,6 +2340,8 @@ class MainWindow(QMainWindow):
                     return result
 
                 challenge = request("/membership/challenge", {"address": account.address, "chainId": 56})
+                if login_generation != self._login_generation:
+                    return
                 challenge_id = challenge.get("challengeId")
                 message = challenge.get("message")
                 if not challenge_id or not isinstance(message, str) or not message:
@@ -2350,13 +2359,19 @@ class MainWindow(QMainWindow):
                 # eth-account's HexBytes.hex() may omit the 0x marker, while
                 # the membership verifier expects an RPC-style hex signature.
                 signature = "0x" + bytes(signed.signature).hex()
+                if login_generation != self._login_generation:
+                    return
                 verification = request("/membership/verify", {
                     "challengeId": challenge_id, "signature": signature, "chainId": 56
                 })
+                if login_generation != self._login_generation:
+                    return
                 wallet_token = verification.get("walletToken")
                 if not wallet_token:
                     raise RuntimeError("签名验证未返回 walletToken")
                 entered = request("/membership/enter", {}, str(wallet_token))
+                if login_generation != self._login_generation:
+                    return
                 game_token = entered.get("token")
                 if not game_token:
                     raise RuntimeError("入场验证未返回游戏会话 token；请确认钱包具备测试服资格")
@@ -2538,6 +2553,7 @@ class MainWindow(QMainWindow):
 
     def disconnect_ws(self) -> None:
         self.manual_disconnect = True
+        self._login_generation += 1
         self._auto_reconnect_login = False
         self._vault_passphrase = None
         self.reconnect_timer.stop()
@@ -2692,6 +2708,18 @@ class MainWindow(QMainWindow):
                 self.last_world_status_render_at = now
                 self.last_world_status_map = self.current_map
 
+    def set_current_map(self, map_id) -> None:
+        try:
+            resolved = int(map_id)
+        except (TypeError, ValueError):
+            return
+        if resolved == self.current_map:
+            return
+        self.current_map = resolved
+        callback = getattr(self, "on_map_change", None)
+        if callable(callback):
+            callback(resolved)
+
     def accept_packet(self, packet: dict) -> None:
         kind = packet.get("type")
         if kind == "pong":
@@ -2714,7 +2742,7 @@ class MainWindow(QMainWindow):
         elif kind == "welcome" and isinstance(packet.get("position"), dict):
             self.welcome_at = time.monotonic()
             position = packet["position"]
-            self.current_map = int(position.get("map", 1))
+            self.set_current_map(position.get("map", 1))
             self.world_x = position.get("x")
             self.world_y = position.get("y")
             self.position_estimated = False
@@ -2794,7 +2822,7 @@ class MainWindow(QMainWindow):
                     self.attack_busy_until = 0.0
                     position = packet.get("position")
                     if isinstance(position, dict):
-                        self.current_map = int(position.get("map", 1))
+                        self.set_current_map(position.get("map", 1))
                         self.world_x = position.get("x", self.world_x)
                         self.world_y = position.get("y", self.world_y)
                         self.movement_revision = int(position.get("revision", self.movement_revision))
@@ -2863,7 +2891,7 @@ class MainWindow(QMainWindow):
             if packet.get("ok"):
                 self.auto_route_retry_count = 0
                 if destination is not None:
-                    self.current_map = destination
+                    self.set_current_map(destination)
                 self.world_x = packet.get("x", self.world_x)
                 self.world_y = packet.get("y", self.world_y)
                 self.movement_revision = int(packet.get("revision", self.movement_revision))
@@ -2983,7 +3011,7 @@ class MainWindow(QMainWindow):
             self.stop_chase()
             position = packet.get("position")
             if isinstance(position, dict):
-                self.current_map = int(position.get("map", self.current_map or 1))
+                self.set_current_map(position.get("map", self.current_map or 1))
                 self.world_x = position.get("x", self.world_x)
                 self.world_y = position.get("y", self.world_y)
                 self.movement_revision = int(position.get("revision", self.movement_revision))
