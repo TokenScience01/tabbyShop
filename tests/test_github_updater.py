@@ -14,40 +14,46 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertEqual(updater.version_tuple('v2.10.3'), (2, 10, 3, 0))
         self.assertGreater(updater.version_tuple('1.2.10'), updater.version_tuple('1.2.9'))
         self.assertEqual(updater.version_tuple('1.2'), updater.version_tuple('1.2.0'))
-        self.assertEqual(updater.APP_VERSION, '1.2.16')
+        self.assertEqual(updater.APP_VERSION, '1.2.17')
 
-    def test_update_script_logs_failures_and_restores_previous_install(self):
+    def test_update_script_logs_failures_rolls_back_and_relaunches(self):
         install_dir = Path('C:/Users/test/App/TabbyDesktop')
         stage = install_dir.parent / '.tabby-update-test'
         script = updater._windows_update_script(
             stage, stage / 'TabbyDesktop', install_dir,
             install_dir.with_name('TabbyDesktop.previous'), 1234)
 
-        self.assertIn('move "%STAGED%" "%TARGET%"', script)
-        self.assertIn('goto rollback', script)
-        self.assertIn('move "%BACKUP%" "%TARGET%"', script)
-        self.assertIn('update.log', script)
-        self.assertIn('start "" "%EXE%"', script)
-        self.assertIn('set "APP_PID=1234"', script)
-        self.assertIn('set /a WAITED=0', script)
-        self.assertIn('if %WAITED% GEQ 300 goto failed', script)
-        self.assertIn('findstr /R /C:"[ ]%APP_PID%[ ]"', script)
-        self.assertIn('Application exited; replacing files.', script)
-        self.assertIn('Updated application launched successfully.', script)
+        self.assertIn("$appPid = 1234", script)
+        self.assertIn("'update.log'", script)
+        self.assertIn("Timed out waiting for Tabby to exit.", script)
+        self.assertIn("Move-Item -LiteralPath $staged -Destination $target", script)
+        self.assertIn("Move-Item -LiteralPath $backup -Destination $target", script)
+        self.assertIn("Application exited; replacing files.", script)
+        self.assertIn("Updated application started", script)
+        self.assertIn("UPDATE FAILED:", script)
+        self.assertIn("PresentationFramework", script)
 
-    def test_update_launcher_quotes_script_paths_for_cmd_with_spaces(self):
+    def test_update_script_quotes_unicode_and_apostrophes_as_powershell_literals(self):
+        install_dir = Path("C:/Users/玩家/O'Brien/TabbyDesktop")
+        stage = install_dir.parent / ".tabby-update-test"
+        script = updater._windows_update_script(
+            stage, stage / "TabbyDesktop", install_dir,
+            install_dir.with_name("TabbyDesktop.previous"), 99)
+        self.assertIn("'C:/Users/玩家/O''Brien/TabbyDesktop'", script)
+
+    def test_update_launcher_passes_script_path_as_powershell_argument(self):
         class WindowsScriptPath:
             def resolve(self):
-                return Path(r'C:\Program Files\Tabby\.tabby-update\install-update.bat')
+                return Path(r'C:\Program Files\Tabby\.tabby-update\install-update.ps1')
 
         with patch.object(updater.os, 'name', 'nt'), \
-             patch.dict('os.environ', {'COMSPEC': r'C:\Windows\System32\cmd.exe'}), \
              patch.object(updater.subprocess, 'Popen') as popen:
             updater.launch_update_script(WindowsScriptPath())
 
         command = popen.call_args.args[0]
-        self.assertEqual(command[:3], [r'C:\Windows\System32\cmd.exe', '/d', '/c'])
-        self.assertEqual(command[3], r'"C:\Program Files\Tabby\.tabby-update\install-update.bat"')
+        self.assertEqual(command[:6], ['powershell.exe', '-NoLogo', '-NoProfile',
+                                      '-ExecutionPolicy', 'Bypass', '-File'])
+        self.assertEqual(command[6], r'C:\Program Files\Tabby\.tabby-update\install-update.ps1')
         self.assertIsInstance(command, list)
 
     def test_latest_release_identifies_newer_version_and_windows_asset(self):

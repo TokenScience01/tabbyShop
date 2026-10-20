@@ -73,6 +73,9 @@ class DesktopTests(unittest.TestCase):
         self.window.planner_limit_level.setChecked(True)
         self.window.planner_level_min.setValue(10)
         self.window.planner_level_max.setValue(30)
+        self.window.planner_farm_after_quests.setChecked(True)
+        self.window.planner_farm_map.setCurrentIndex(self.window.planner_farm_map.findData(4))
+        self.window.planner_avoid_contested.setChecked(True)
 
         self.window.start_multi_account_plan()
 
@@ -82,6 +85,9 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(game.auto_potion.isChecked())
         self.assertTrue(game.monster_level_limited.isChecked())
         self.assertEqual((game.monster_level_min.value(), game.monster_level_max.value()), (10, 30))
+        self.assertTrue(game.no_quest_farm.isChecked())
+        self.assertEqual(game.no_quest_farm_map.currentData(), 4)
+        self.assertTrue(game.avoid_contested_monsters.isChecked())
         self.assertIn('已启动 1 个账号', self.window.planner_status.text())
 
         self.window.pause_multi_account_plan()
@@ -633,6 +639,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_task_limited_mode_stops_at_objective_and_task_cap(self):
         game = self.window.game
+        game.no_quest_farm.setChecked(False)
         game.task_limited_mode.setChecked(True)
         game.latest_quests = [{
             'id': 1, 'objectiveType': 'MONSTER', 'accepted': True,
@@ -649,6 +656,49 @@ class DesktopTests(unittest.TestCase):
         self.assertIsNone(game.questless_farm_target)
         self.assertFalse(game.combat_timer.isActive())
 
+    def test_task_cap_uses_configured_farm_map_when_enabled(self):
+        game = self.window.game
+        game.task_limited_mode.setChecked(True)
+        game.no_quest_farm_map.setCurrentIndex(game.no_quest_farm_map.findData(4))
+        game.no_quest_farm.setChecked(True)
+
+        game.handle_quest_limit_reached('daily cap')
+
+        self.assertTrue(game.questless_farm_mode)
+        self.assertEqual(game.questless_farm_target, 4)
+        self.assertFalse(game.task_limited_mode.isChecked())
+        self.assertTrue(game.auto_attack.isChecked())
+        self.assertEqual(game.return_map.currentData(), 4)
+        self.assertTrue(game.auto_return_map.isChecked())
+
+    def test_no_available_followup_quest_starts_selected_free_farm(self):
+        game = self.window.game
+        game.no_quest_farm_map.setCurrentIndex(game.no_quest_farm_map.findData(6))
+        game.no_quest_farm.setChecked(True)
+
+        game.accept_profile_data({'questRefresh': True, 'questData': {'quests': []}})
+
+        self.assertTrue(game.questless_farm_mode)
+        self.assertEqual(game.questless_farm_target, 6)
+        self.assertTrue(game.auto_attack.isChecked())
+
+    def test_contested_monster_filter_skips_other_players_but_not_self(self):
+        game = self.window.game
+        game.player_id = 7
+        game.current_map = 2
+        game.avoid_contested_monsters.setChecked(True)
+        monster = {'mapId': 2, 'x': 100, 'y': 100}
+        game.last_peers = [
+            {'id': 7, 'mapId': 2, 'x': 100, 'y': 100},
+            {'id': 8, 'mapId': 2, 'x': 240, 'y': 100},
+        ]
+        self.assertTrue(game.monster_has_nearby_player(monster))
+        self.assertFalse(game.monster_is_uncontested(monster))
+
+        game.last_peers = [{'id': 7, 'mapId': 2, 'x': 100, 'y': 100}]
+        self.assertFalse(game.monster_has_nearby_player(monster))
+        self.assertTrue(game.monster_is_uncontested(monster))
+
     def test_rarity_colors_and_current_map_indicator(self):
         self.assertEqual([quality_color(f'L{level}') for level in range(1, 5)],
                          ['#f2f2ef', '#69b3ff', '#c994ff', '#ffcf72'])
@@ -658,9 +708,9 @@ class DesktopTests(unittest.TestCase):
     def test_game_palette_and_action_buttons_are_visibly_clickable(self):
         game = self.window.game
         stylesheet = game.styleSheet()
-        self.assertIn('background: #17191A', stylesheet)
-        self.assertIn('QPushButton#quietButton { background: #292E2D', stylesheet)
-        self.assertIn('border: 1px solid #535A56', stylesheet)
+        self.assertIn('background: #F1EEE7', stylesheet)
+        self.assertIn('QPushButton#quietButton { background: #F7F4ED', stylesheet)
+        self.assertIn('border: 1px solid #D5CEBF', stylesheet)
         self.assertIn('QTabBar::tab { background: transparent', stylesheet)
         self.assertIn('QTabWidget::pane { border: 0; background: transparent; }', stylesheet)
         self.assertIn('QPushButton#shellNav { min-height: 40px', self.window.styleSheet())
@@ -1111,7 +1161,7 @@ class DesktopTests(unittest.TestCase):
         self.app.processEvents()
         style = game.backpack_table.styleSheet()
         self.assertIn('QTableWidget::item:selected', style)
-        self.assertIn('#FFFFFF', style)
+        self.assertIn('#293C2B', style)
         self.assertGreaterEqual(game.backpack_table.rowHeight(0), 48)
         self.assertGreaterEqual(game.backpack_dialog.width(), game.backpack_dialog.minimumWidth())
         game.backpack_table.selectRow(0)
@@ -1422,7 +1472,7 @@ class DesktopTests(unittest.TestCase):
         image = QImage(320, 320, QImage.Format.Format_ARGB32)
         image.fill(0)
         game.minimap.render(image)
-        self.assertEqual(image.pixelColor(20, 20).name(), '#191d1e')
+        self.assertEqual(image.pixelColor(20, 20).name(), '#faf8f3')
 
     def test_nearby_players_survive_empty_and_partial_snapshots_until_stale(self):
         game = self.window.game

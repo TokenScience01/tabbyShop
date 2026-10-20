@@ -42,15 +42,15 @@ class TacticalMap(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor('#191D1E'))
+        p.fillRect(self.rect(), QColor('#FAF8F3'))
         o = self.owner
-        p.setPen(QColor('#303635'))
+        p.setPen(QColor('#E5E0D6'))
         for x in range(0, self.width(), 32):
             p.drawLine(x, 0, x, self.height())
         for y in range(0, self.height(), 32):
             p.drawLine(0, y, self.width(), y)
         if o.current_map is None or o.world_x is None or o.world_y is None:
-            p.setPen(QColor('#AAB4B1'))
+            p.setPen(QColor('#77776E'))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '连接后显示实时地图')
             return
         monsters = [m for m in o.monsters.values() if m.get('mapId') == o.current_map
@@ -95,7 +95,7 @@ class TacticalMap(QWidget):
             p.drawPath(path)
         for dest,(x,y) in portals:
             pos = point(x,y)
-            p.setPen(QPen(QColor('#AFA27E'),2));p.setBrush(QColor('#302A25'))
+            p.setPen(QPen(QColor('#9A7844'),2));p.setBrush(QColor('#F3EFE6'))
             p.drawRoundedRect(QRectF(pos.x()-5,pos.y()-5,10,10),2,2)
             # Keep labels inside the canvas even for portals on its edges.
             tx = min(self.width()-18, max(4, pos.x()+8))

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from town_navigation import find_map_path, find_town_path
-from minimap import TacticalMap
+from minimap import TacticalMap, peer_map_position
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap
@@ -560,7 +560,7 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         root.setObjectName("root")
-        root.setMinimumHeight(930)
+        root.setMinimumHeight(780)
         outer = QVBoxLayout(root)
         outer.setContentsMargins(24, 22, 24, 22)
         outer.setSpacing(16)
@@ -942,6 +942,23 @@ class MainWindow(QMainWindow):
         quest_travel_row.addWidget(self.quest_map_auto)
         quest_travel_row.addStretch(1)
         quest_layout.addLayout(quest_travel_row)
+        fallback_row = QHBoxLayout()
+        self.no_quest_farm = QCheckBox("无可接任务后刷指定地图")
+        self.no_quest_farm.setToolTip("当前任务做完且服务端没有下一项可接时，自动前往指定地图继续刷怪；复活后也会返回该地图。")
+        self.no_quest_farm.setChecked(self.settings.value("farmAfterQuests", False, type=bool))
+        self.no_quest_farm_map = QComboBox()
+        for map_id, name in MAP_NAMES.items():
+            if map_id != 1:
+                self.no_quest_farm_map.addItem(name, map_id)
+        saved_farm_map = self.settings.value("farmAfterQuestsMap", 2, type=int)
+        saved_farm_index = self.no_quest_farm_map.findData(saved_farm_map)
+        if saved_farm_index >= 0:
+            self.no_quest_farm_map.setCurrentIndex(saved_farm_index)
+        self.no_quest_farm.toggled.connect(self.on_no_quest_farm_changed)
+        self.no_quest_farm_map.currentIndexChanged.connect(self.on_no_quest_farm_map_changed)
+        fallback_row.addWidget(self.no_quest_farm)
+        fallback_row.addWidget(self.no_quest_farm_map, 1)
+        quest_layout.addLayout(fallback_row)
         self.quest_status = QLabel("等待服务端任务数据…")
         self.quest_status.setObjectName("subtitle")
         quest_layout.addWidget(self.quest_status)
@@ -1060,6 +1077,13 @@ class MainWindow(QMainWindow):
         level_controls.addWidget(self.monster_level_limited)
         level_controls.addWidget(self.monster_level_min)
         level_controls.addWidget(self.monster_level_max)
+        self.avoid_contested_monsters = QCheckBox("优先找附近无人争抢的怪")
+        self.avoid_contested_monsters.setToolTip(
+            "开启后会跳过周围 180 游戏单位内有其他玩家的怪物；依据服务端最近 8 秒内上报的附近玩家位置。")
+        self.avoid_contested_monsters.setChecked(
+            self.settings.value("avoidContestedMonsters", False, type=bool))
+        self.avoid_contested_monsters.toggled.connect(self.on_avoid_contested_changed)
+        level_controls.addWidget(self.avoid_contested_monsters)
         level_controls.addStretch(1)
         combat_layout.addLayout(level_controls)
         combat_hint = QLabel("自动模式会搜索并追击当前地图怪物；北部雪地暂无怪物时会沿已验证路线巡逻搜索。")
@@ -1150,8 +1174,8 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("root")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
         def place(box, widget, stretch=0):
             widget.setParent(root)
@@ -1212,8 +1236,9 @@ class MainWindow(QMainWindow):
         left.setSpacing(14)
         left_panel = QWidget(root)
         left_panel.setLayout(left)
-        left_panel.setFixedWidth(345)
-        left_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        left_panel.setMinimumWidth(250)
+        left_panel.setMaximumWidth(340)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         columns.addWidget(left_panel, 0, Qt.AlignmentFlag.AlignTop)
         right = QVBoxLayout()
         right.setSpacing(14)
@@ -1239,7 +1264,7 @@ class MainWindow(QMainWindow):
         portrait.setFixedSize(82, 108)
         portrait.setAlignment(Qt.AlignmentFlag.AlignCenter)
         portrait.setText("连接后\n加载角色")
-        portrait.setStyleSheet("background:#292E2D;border:1px solid #414846;border-radius:10px;color:#AAB4B1;font-size:10px;")
+        portrait.setStyleSheet("background:#F3EFE6;border:1px solid #DED7CA;border-radius:10px;color:#6F7168;font-size:10px;")
         character_row.addWidget(portrait)
         self.character_status.setParent(root)
         self.character_status.hide()
@@ -1274,7 +1299,7 @@ class MainWindow(QMainWindow):
             bar.setFormat("等待数据")
             bar.setFixedHeight(18)
             fill = "#648c50" if bar is self.health_bar else "#B69460" if bar is self.fatigue_bar else "#5798A8"
-            bar.setStyleSheet("QProgressBar {background:#191D1E;border:1px solid #444C4A;border-radius:5px;text-align:center;color:#F1F4F2;font-size:11px;} QProgressBar::chunk {background:" + fill + ";border-radius:4px;}")
+            bar.setStyleSheet("QProgressBar {background:#FFFFFF;border:1px solid #D5CEBF;border-radius:5px;text-align:center;color:#373A33;font-size:11px;} QProgressBar::chunk {background:" + fill + ";border-radius:4px;}")
             bar_row = QHBoxLayout()
             label = QLabel(title)
             label.setObjectName("subtitle")
@@ -1325,7 +1350,7 @@ class MainWindow(QMainWindow):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setMinimumWidth(0)
             label.setWordWrap(True)
-            label.setStyleSheet("background:#191D1E;border:1px solid #363D3C;border-radius:6px;padding:6px;")
+            label.setStyleSheet("background:#FFFFFF;border:1px solid #DED7CA;border-radius:6px;padding:6px;")
             self.gear_slots[slot] = (name, label)
             cell = QWidget()
             cell_row = QHBoxLayout(cell)
@@ -1373,7 +1398,8 @@ class MainWindow(QMainWindow):
         left.addStretch()
 
         map_card, box = card("实时小地图")
-        map_card.setFixedWidth(260)
+        map_card.setMinimumWidth(220)
+        map_card.setMaximumWidth(300)
         self.minimap.setMinimumHeight(0)
         self.minimap.setFixedHeight(210)
         place(box, self.minimap)
@@ -1391,12 +1417,16 @@ class MainWindow(QMainWindow):
         overview = QHBoxLayout()
         overview.setSpacing(14)
         character.setMinimumHeight(0)
-        map_card.setFixedHeight(340)
-        self.minimap.setFixedHeight(190)
+        map_card.setMinimumHeight(0)
+        map_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.minimap.setMinimumHeight(170)
+        self.minimap.setMaximumHeight(220)
         character.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         overview.addWidget(character, 1)
         map_column = QWidget(root)
-        map_column.setFixedWidth(260)
+        map_column.setMinimumWidth(220)
+        map_column.setMaximumWidth(300)
+        map_column.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         map_column_layout = QVBoxLayout(map_column)
         map_column_layout.setContentsMargins(0, 0, 0, 0)
         map_column_layout.setSpacing(12)
@@ -1764,18 +1794,18 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 700)
         self.resize(1180, 850)
         self.setStyleSheet(self.styleSheet() + """
-            QFrame#taskOptions { background:#1B1E1F; border:1px solid #363D3C; border-radius:10px; }
-            QLabel { color: #E8ECEB; }
+            QFrame#taskOptions { background:#F7F4ED; border:1px solid #DED7CA; border-radius:10px; }
+            QLabel { color: #292C26; }
             QTabWidget::pane { border: 0; background: transparent; }
-            QTabBar::tab { background: transparent; color: #AAB4B1; padding: 9px 13px; min-height: 26px; border: 0; border-bottom: 2px solid transparent; margin-right: 8px; }
-            QTabBar::tab:selected { color: #E5EBE4; background: transparent; border-bottom: 2px solid #78936B; }
-            QTabBar::tab:hover { color: #FFFFFF; background: #222627; border-bottom: 2px solid #535A56; }
-            QTabBar::tab:selected:hover { border-bottom-color: #91AD80; }
-            QComboBox { color: #E8ECEB; background: #191D1E; border: 1px solid #535A56; border-radius: 7px; padding: 8px; }
-            QComboBox QAbstractItemView { color: #E8ECEB; background: #292E2D; selection-background-color: #38533A; }
-            QHeaderView { background: #292E2D; }
-            QPushButton:focus, QCheckBox:focus, QComboBox:focus { border: 1px solid #9D875C; }
-            QLabel#resourceChip { background:#292E2D; color:#D1D8D5; border:1px solid #414846; border-radius:7px; padding:7px 4px; font-size:11px; }
+            QTabBar::tab { background: transparent; color: #6F7168; padding: 9px 13px; min-height: 26px; border: 0; border-bottom: 2px solid transparent; margin-right: 8px; }
+            QTabBar::tab:selected { color: #292C26; background: transparent; border-bottom: 2px solid #63815E; }
+            QTabBar::tab:hover { color: #292C26; background: #F3EFE6; border-bottom: 2px solid #A7B49B; }
+            QTabBar::tab:selected:hover { border-bottom-color: #63815E; }
+            QComboBox { color: #373A33; background: #FFFFFF; border: 1px solid #D5CEBF; border-radius: 7px; padding: 8px; }
+            QComboBox QAbstractItemView { color: #373A33; background: #FFFFFF; selection-background-color: #E4EBDC; }
+            QHeaderView { background: #F3EFE6; }
+            QPushButton:focus, QCheckBox:focus, QComboBox:focus { border: 1px solid #8A9E80; }
+            QLabel#resourceChip { background:#F3EFE6; color:#555A51; border:1px solid #DED7CA; border-radius:7px; padding:7px 4px; font-size:11px; }
         """)
         for button in root.findChildren(QPushButton):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1800,46 +1830,46 @@ class MainWindow(QMainWindow):
     def apply_theme(self) -> None:
         check_icon = Path(__file__).with_name("assets") / "checkmark.svg"
         self.setStyleSheet("""
-            QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #17191A; color: #E8ECEB; }
-            QFrame#card { background: #222627; border: 1px solid #363D3C; border-radius: 12px; }
-            QFrame#emptyState { background: #1B1E1F; border: 1px dashed #4A514E; border-radius: 10px; }
-            QFrame#statChip { background:#292E2D; border:1px solid #414846; border-radius:7px; }
-            QFrame#sessionCard { background: #252A29; border: 1px solid #66583E; border-radius: 10px; }
-            QLabel#title { color: #F3F5F3; font-size: 23px; font-weight: 700; }
-            QLabel#subtitle { color: #AAB4B1; font-size: 12px; }
-            QLabel#sectionTitle { color: #E8ECEB; font-size: 15px; font-weight: 700; }
-            QLabel#fieldLabel { color: #B7C0BD; font-size: 12px; font-weight: 600; }
-            QLabel#currentMapBadge { color: #E8ECEB; background: #29392C; border: 1px solid #58744C; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-weight: 700; }
-            QLabel#sessionUrl { color: #D9E0DE; font-family: Menlo, monospace; font-size: 13px; }
-            QLabel#status { color: #AAB4B1; font-size: 12px; font-weight: 700; }
-            QLineEdit, QPlainTextEdit, QSpinBox { background: #191D1E; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 8px; padding: 8px 10px; selection-background-color: #38533A; }
-            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #9D875C; }
-            QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #818B88; }
+            QMainWindow, QDialog, QScrollArea#mainScroll, QWidget#root { background: #F1EEE7; color: #292C26; }
+            QFrame#card { background: #FBF9F4; border: 1px solid #DED7CA; border-radius: 12px; }
+            QFrame#emptyState { background: #F7F4ED; border: 1px dashed #CFC7B8; border-radius: 10px; }
+            QFrame#statChip { background:#F3EFE6; border:1px solid #DED7CA; border-radius:7px; }
+            QFrame#sessionCard { background: #F6F1E7; border: 1px solid #D5C49F; border-radius: 10px; }
+            QLabel#title { color: #292C26; font-size: 23px; font-weight: 700; }
+            QLabel#subtitle { color: #6F7168; font-size: 12px; }
+            QLabel#sectionTitle { color: #292C26; font-size: 15px; font-weight: 700; }
+            QLabel#fieldLabel { color: #555A51; font-size: 12px; font-weight: 600; }
+            QLabel#currentMapBadge { color: #435B40; background: #E8EFE3; border: 1px solid #B8C8AF; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-weight: 700; }
+            QLabel#sessionUrl { color: #4D5F49; font-family: Menlo, monospace; font-size: 13px; }
+            QLabel#status { color: #6F7168; font-size: 12px; font-weight: 700; }
+            QLineEdit, QPlainTextEdit, QSpinBox { background: #FFFFFF; color: #292C26; border: 1px solid #D5CEBF; border-radius: 8px; padding: 8px 10px; selection-background-color: #DDE8D7; }
+            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #8A9E80; }
+            QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #8A8B83; }
             QLineEdit#urlInput, QPlainTextEdit#messageInput, QPlainTextEdit#logView { font-family: Menlo, monospace; font-size: 12px; }
-            QPlainTextEdit#logView { background: #191D1E; color: #D5DDDA; border: 1px solid #363D3C; }
-            QTableWidget { background: #1B1F20; alternate-background-color: #232829; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 10px; gridline-color: #363D3C; selection-background-color: #35543C; outline: 0; }
+            QPlainTextEdit#logView { background: #FFFFFF; color: #454940; border: 1px solid #DED7CA; }
+            QTableWidget { background: #FFFFFF; alternate-background-color: #F7F5F0; color: #292C26; border: 1px solid #D5CEBF; border-radius: 10px; gridline-color: #E6E1D7; selection-background-color: #E4EBDC; outline: 0; }
             QTableWidget::item { padding: 4px 7px; }
-            QTableWidget::item:selected { background: #35543C; color: #FFFFFF; border: 1px solid #8AB578; }
-            QTableWidget::item:selected:!active { background: #304637; color: #F1F5EF; border: 1px solid #6F8E68; }
-            QHeaderView::section { background: #292E2D; color: #C6CFCC; border: 0; border-bottom: 1px solid #444C4A; padding: 8px; font-weight: 600; }
+            QTableWidget::item:selected { background: #E4EBDC; color: #293C2B; border: 1px solid #AABCA2; }
+            QTableWidget::item:selected:!active { background: #EEF1E9; color: #374337; border: 1px solid #C5D0BD; }
+            QHeaderView::section { background: #F3EFE6; color: #555A51; border: 0; border-bottom: 1px solid #D5CEBF; padding: 8px; font-weight: 600; }
             QPushButton { min-height: 32px; padding: 3px 15px; border-radius: 8px; font-weight: 600; }
-            QPushButton#primaryButton { background: #3C7951; color: #F4F7F4; border: 1px solid #579166; }
-            QPushButton#primaryButton:hover { background: #498D5D; border-color: #70A877; }
-            QPushButton#secondaryButton { background: #302A25; color: #E6E8E5; border: 1px solid #766448; }
-            QPushButton#secondaryButton:hover { background: #494036; border-color: #B69460; }
-            QPushButton#secondaryButton[currentMap="true"] { background: #304333; color: #F1F5EF; border: 2px solid #81966B; }
-            QPushButton#quietButton { background: #292E2D; color: #D5DDDA; border: 1px solid #535A56; padding-left: 12px; padding-right: 12px; }
-            QPushButton#quietButton:hover { color: #FFFFFF; background: #343A37; border-color: #9D875C; }
-            QPushButton:disabled { background: #242827; color: #78817E; border: 1px solid #363D3C; }
-            QCheckBox { color: #D2D9D6; spacing: 10px; }
-            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #59615D; background: #191D1E; }
-            QCheckBox::indicator:hover { border-color: #9D875C; background: #292E2D; }
-            QCheckBox::indicator:checked { background: #3C7951; border: 1px solid #70A877; image: url("@CHECK_ICON@"); }
-            QCheckBox[taskOption="true"] { color: #E1E6E3; spacing: 10px; padding: 5px 11px; min-height: 30px; background: #292E2D; border: 1px solid #414846; border-radius: 8px; }
-            QCheckBox[taskOption="true"]:hover { background: #343A37; border-color: #766448; }
-            QCheckBox[taskOption="true"]:checked { border-color: #648468; }
-            QScrollBar:vertical { background: #17191A; width: 10px; }
-            QScrollBar::handle:vertical { background: #4A514E; border-radius: 5px; min-height: 25px; }
+            QPushButton#primaryButton { background: #5B7C55; color: #FFFFFF; border: 1px solid #52734D; }
+            QPushButton#primaryButton:hover { background: #496B47; border-color: #496B47; }
+            QPushButton#secondaryButton { background: #F3EFE6; color: #514630; border: 1px solid #CDBD9F; }
+            QPushButton#secondaryButton:hover { background: #ECE4D4; border-color: #B99B67; }
+            QPushButton#secondaryButton[currentMap="true"] { background: #E7EEDF; color: #38533A; border: 2px solid #8FA487; }
+            QPushButton#quietButton { background: #F7F4ED; color: #4D5F49; border: 1px solid #D5CEBF; padding-left: 12px; padding-right: 12px; }
+            QPushButton#quietButton:hover { color: #38553C; background: #EDF3E9; border-color: #89A184; }
+            QPushButton:disabled { background: #EEEAE1; color: #92938B; border: 1px solid #DED7CA; }
+            QCheckBox { color: #454940; spacing: 10px; }
+            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #B8B5AA; background: #FFFFFF; }
+            QCheckBox::indicator:hover { border-color: #63815E; background: #F3F7F0; }
+            QCheckBox::indicator:checked { background: #63815E; border: 1px solid #63815E; image: url("@CHECK_ICON@"); }
+            QCheckBox[taskOption="true"] { color: #454940; spacing: 10px; padding: 5px 11px; min-height: 30px; background: #F3EFE6; border: 1px solid #DED7CA; border-radius: 8px; }
+            QCheckBox[taskOption="true"]:hover { background: #ECE8DF; border-color: #B9C5B0; }
+            QCheckBox[taskOption="true"]:checked { border-color: #8FA487; }
+            QScrollBar:vertical { background: #F1EEE7; width: 10px; }
+            QScrollBar::handle:vertical { background: #C8C3B8; border-radius: 5px; min-height: 25px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """.replace("@CHECK_ICON@", str(check_icon).replace("\\", "/")))
 
@@ -3081,7 +3111,7 @@ class MainWindow(QMainWindow):
             elif destination is not None:
                 self.schedule_auto_travel_retry()
 
-    def update_quests(self, quests: list) -> None:
+    def update_quests(self, quests: list, *, request_next: bool = True) -> None:
         rows = [quest for quest in quests if isinstance(quest, dict)]
         current_states = {}
         for quest in rows:
@@ -3145,15 +3175,107 @@ class MainWindow(QMainWindow):
                 if self.auto_attack.isChecked() and self.world_ready and not self.server_dead:
                     self.combat_timer.start()
                 self.combat_status.setText("任务有限模式：只攻击当前任务所需怪物。")
-            else:
+            elif self.questless_farm_mode and self.no_quest_farm.isChecked():
+                self.combat_status.setText(
+                    f"当前没有可接任务；正在前往 {MAP_NAMES.get(self.questless_farm_target, '刷怪地图')} 继续刷怪。")
+            elif not self.no_quest_farm.isChecked():
                 self.combat_timer.stop()
                 self.stop_chase()
                 self.combat_generation += 1
                 self.questless_farm_mode = False
                 self.questless_farm_target = None
                 self.combat_status.setText("任务有限模式：没有进行中的怪物任务，自动攻击已暂停。")
-        if not active and hasattr(self, "auto_quest") and self.auto_quest.isChecked():
+        if (request_next and not active and hasattr(self, "auto_quest")
+                and self.auto_quest.isChecked() and not self.questless_farm_mode):
             self.accept_next_monster_quest()
+
+    def on_no_quest_farm_changed(self, enabled: bool) -> None:
+        self.settings.setValue("farmAfterQuests", enabled)
+        if enabled and self.quest_accept_blocked_date == datetime.now().date():
+            self.start_questless_farming()
+        elif not enabled and self.questless_farm_mode:
+            self.questless_farm_mode = False
+            self.questless_farm_target = None
+            self.quest_map_target = None
+            if self.pending_destination is not None or self.move_timer.isActive():
+                self.cancel_travel()
+            if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
+                self.combat_timer.stop()
+                self.stop_chase()
+
+    def on_avoid_contested_changed(self, enabled: bool) -> None:
+        self.settings.setValue("avoidContestedMonsters", enabled)
+        if enabled and self.chase_target is not None:
+            target = self.monsters.get(self.chase_target)
+            if target is not None and self.monster_has_nearby_player(target):
+                self.stop_chase()
+                self.combat_status.setText("目标附近有其他玩家，已跳过并继续寻找空闲怪物。")
+
+    def monster_has_nearby_player(self, monster: dict, radius: float = 180.0) -> bool:
+        """Return whether a fresh nearby-player snapshot shows contention at this monster."""
+        if not isinstance(monster, dict):
+            return False
+        try:
+            monster_map = int(monster.get("mapId", self.current_map))
+            mx, my = float(monster["x"]), float(monster["y"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        for peer in getattr(self, "last_peers", []):
+            location = peer_map_position(peer, self.current_map)
+            if location is None or location[0] != monster_map:
+                continue
+            peer_id = peer.get("id", peer.get("playerId")) if isinstance(peer, dict) else None
+            if self.player_id is not None and str(peer_id) == str(self.player_id):
+                continue
+            if math.dist((mx, my), (location[1], location[2])) <= radius:
+                return True
+        return False
+
+    def monster_is_uncontested(self, monster: dict) -> bool:
+        return not (self.avoid_contested_monsters.isChecked()
+                    and self.monster_has_nearby_player(monster))
+
+    def on_no_quest_farm_map_changed(self, *_args) -> None:
+        self.settings.setValue("farmAfterQuestsMap", self.no_quest_farm_map.currentData())
+        if self.questless_farm_mode and self.no_quest_farm.isChecked():
+            self.questless_farm_target = self.no_quest_farm_map.currentData()
+            self.return_map.setCurrentIndex(self.return_map.findData(self.questless_farm_target))
+            self.auto_return_map.setChecked(True)
+            if (self.world_ready and not self.server_dead and not self.respawn_pending
+                    and self.current_map != self.questless_farm_target):
+                self.quest_map_target = self.questless_farm_target
+                QTimer.singleShot(0, self.continue_quest_map_travel)
+
+    def start_questless_farming(self) -> bool:
+        if not self.no_quest_farm.isChecked():
+            return False
+        try:
+            target = int(self.no_quest_farm_map.currentData())
+        except (TypeError, ValueError):
+            target = 2
+        if target not in MAP_NAMES or target == 1:
+            target = 2
+        if target == 5 and not self.use_ticket.isChecked():
+            self.quest_status.setText("任务已完成，但刷怪目标为废弃遗迹；请先勾选使用入场券。")
+            return False
+        self.questless_farm_mode = True
+        self.questless_farm_target = target
+        self.quest_map_target = None
+        self.quest_map_quest_id = None
+        self.task_limited_mode.setChecked(False)
+        self.auto_attack.setChecked(True)
+        self.return_map.setCurrentIndex(self.return_map.findData(target))
+        self.auto_return_map.setChecked(True)
+        self.quest_status.setText(f"没有可接打怪任务，已切换为自由刷怪：{MAP_NAMES[target]}。")
+        if self.world_ready and not self.server_dead and not self.respawn_pending:
+            if self.current_map == target:
+                self.quest_map_target = None
+                self.combat_timer.start()
+                self.travel_status.setText(f"已在 {MAP_NAMES[target]}，自动战斗会继续寻找怪物。")
+            else:
+                self.quest_map_target = target
+                QTimer.singleShot(0, self.continue_quest_map_travel)
+        return True
 
     def save_lark_webhook(self, value: str) -> None:
         webhook = value.strip()
@@ -3691,6 +3813,15 @@ class MainWindow(QMainWindow):
 
     def handle_quest_limit_reached(self, detail: str = "") -> None:
         self.quest_accept_blocked_date = datetime.now().date()
+        if self.no_quest_farm.isChecked():
+            self.start_questless_farming()
+            explanation = (f"今日任务领取已满；将按设置前往 "
+                           f"{MAP_NAMES.get(self.questless_farm_target, '刷怪地图')} 继续刷怪。")
+            if detail:
+                explanation += f" 服务端：{detail}"
+            self.quest_status.setText(explanation)
+            self.append_log(explanation)
+            return
         if self.task_limited_mode.isChecked():
             if self.questless_farm_mode and (self.pending_destination is not None or self.move_timer.isActive()):
                 self.cancel_travel()
@@ -4049,11 +4180,20 @@ class MainWindow(QMainWindow):
                 self.quest_accept_blocked_date = datetime.now().date()
             payload = data.get("questData")
             if isinstance(payload, dict) and isinstance(payload.get("quests"), list):
-                self.update_quests(payload["quests"])
+                self.update_quests(payload["quests"], request_next=False)
             if data.get("questLimitReached"):
                 self.handle_quest_limit_reached(str(data.get("questError", "")))
             if data.get("acceptedQuestId"):
                 self.append_log(f"已自动接取打怪任务：{data['acceptedQuestId']}")
+            elif (not data.get("questLimitReached") and self.no_quest_farm.isChecked()
+                  and not self.has_active_monster_quest()):
+                quests = payload.get("quests", []) if isinstance(payload, dict) else []
+                available = any(isinstance(quest, dict) and quest.get("available")
+                                and not quest.get("accepted") and not quest.get("completed")
+                                and quest.get("objectiveType") == "MONSTER"
+                                for quest in quests)
+                if not available:
+                    self.start_questless_farming()
             return
         self.profile_refresh_inflight = False
         if hasattr(self, "refresh_profile_button"):
@@ -4151,7 +4291,7 @@ class MainWindow(QMainWindow):
             else:
                 self.character_portrait.clear()
                 self.character_portrait.setText("连接后\n加载角色")
-                self.character_portrait.setStyleSheet("background:#292E2D;border:1px solid #414846;border-radius:10px;color:#AAB4B1;font-size:10px;")
+                self.character_portrait.setStyleSheet("background:#F3EFE6;border:1px solid #DED7CA;border-radius:10px;color:#6F7168;font-size:10px;")
         level = progress.get("level", profile.get("level", "—"))
         experience = progress.get("experience", profile.get("experience", "—"))
         experience_needed = progress.get("experienceNeeded", "—")
@@ -4323,7 +4463,7 @@ class MainWindow(QMainWindow):
             self.backpack_table.setAlternatingRowColors(True)
             self.backpack_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.backpack_table.setToolTip("按住 Ctrl（macOS 上按 ⌘）可多选；只能比较同一部位的装备。")
-            self.backpack_table.setStyleSheet("QTableWidget::item:selected { background:#35543C; color:#FFFFFF; border:1px solid #8AB578; } QTableWidget::item:selected:!active { background:#304637; color:#F1F5EF; border:1px solid #6F8E68; }")
+            self.backpack_table.setStyleSheet("QTableWidget::item:selected { background:#E4EBDC; color:#293C2B; border:1px solid #AABCA2; } QTableWidget::item:selected:!active { background:#EEF1E9; color:#374337; border:1px solid #C5D0BD; }")
             self.backpack_table.itemSelectionChanged.connect(self.update_backpack_action)
             self.backpack_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             self.backpack_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
@@ -4948,7 +5088,8 @@ class MainWindow(QMainWindow):
         self.attack_button.setEnabled(self.ws is not None and self.world_ready
                                       and self.pending_destination is None
                                       and monster is not None
-                                      and self.monster_matches_level_range(monster))
+                                      and self.monster_matches_level_range(monster)
+                                      and self.monster_is_uncontested(monster))
 
     @staticmethod
     def monster_level(monster: dict) -> int | None:
@@ -5008,6 +5149,9 @@ class MainWindow(QMainWindow):
         monster = self.monsters.get(encounter_id)
         if monster is not None and not self.monster_matches_level_range(monster):
             self.combat_status.setText("该怪物不在设定的等级范围内，已跳过。")
+            return False
+        if monster is not None and not self.monster_is_uncontested(monster):
+            self.combat_status.setText("该怪物附近有其他玩家，已按设置跳过。")
             return False
         if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
             self.combat_status.setText("任务有限模式：当前没有未完成的怪物任务，不会攻击。")
@@ -5145,18 +5289,22 @@ class MainWindow(QMainWindow):
             return
         if self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending or self.pending_destination is not None:
             return
-        candidates = [(self.monster_distance(monster), encounter_id)
-                      for encounter_id, monster in self.monsters.items()
-                      if int(monster.get("mapId", -1)) == self.current_map
-                      and int(monster.get("health", 0)) > 0
-                      and self.monster_matches_active_quest(monster)
-                      and self.monster_matches_level_range(monster)
-                      and time.monotonic() >= self.invalid_target_until.get(encounter_id, 0.0)
-                      and (not self.elite_only.isChecked() or
-                           str(monster.get("monsterRank", "")).upper() == "ELITE")]
+        eligible_monsters = [(self.monster_distance(monster), encounter_id, monster)
+                              for encounter_id, monster in self.monsters.items()
+                              if int(monster.get("mapId", -1)) == self.current_map
+                              and int(monster.get("health", 0)) > 0
+                              and self.monster_matches_active_quest(monster)
+                              and self.monster_matches_level_range(monster)
+                              and time.monotonic() >= self.invalid_target_until.get(encounter_id, 0.0)
+                              and (not self.elite_only.isChecked() or
+                                   str(monster.get("monsterRank", "")).upper() == "ELITE")]
+        candidates = [(distance, encounter_id) for distance, encounter_id, monster in eligible_monsters
+                      if self.monster_is_uncontested(monster)]
         if not candidates:
             if self.chase_target is not None:
                 self.stop_chase()
+            if eligible_monsters and self.avoid_contested_monsters.isChecked():
+                self.combat_status.setText("附近可见怪物周围都有其他玩家，正在搜索更空闲的位置。")
             if not self.patrol_timer.isActive() and time.monotonic() >= self.patrol_retry_after:
                 self.start_patrol()
             return
@@ -5333,6 +5481,7 @@ class MainWindow(QMainWindow):
             self.movement_corrections = 0
         monster = self.monsters.get(encounter_id)
         if (not monster or not self.monster_matches_level_range(monster)
+                or not self.monster_is_uncontested(monster)
                 or self.world_x is None or self.world_y is None):
             return
         start = float(self.world_x), float(self.world_y)

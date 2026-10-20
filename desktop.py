@@ -99,8 +99,8 @@ class DesktopWindow(QMainWindow):
         self.setWindowTitle('Tabby · 游戏与商城')
         app_icon = QIcon(str(BASE_DIR / 'assets' / 'tabby-logo.png'))
         self.setWindowIcon(app_icon)
-        self.resize(1220, 900)
-        self.setMinimumSize(920, 720)
+        self.resize(1360, 920)
+        self.setMinimumSize(980, 740)
         self._token = ''
         self.active_address = ''
         self._active_private_key = ''
@@ -129,65 +129,71 @@ class DesktopWindow(QMainWindow):
         # Keep the game controller alive while hosting its existing widget.
         content = self.game.takeCentralWidget()
         self.setStyleSheet(self.game.styleSheet() + """
-            QLabel#appBrand { color: #E8ECEB; font-size: 15px; font-weight: 700; }
-            QLabel#shellStatus { color: #AAB4B1; font-size: 12px; }
+            QLabel#appBrand { color: #292C26; font-size: 15px; font-weight: 700; }
+            QLabel#shellStatus { color: #6F7168; font-size: 12px; }
             QLabel#connectionDot { border-radius: 5px; }
             QPushButton#shellNav { min-height: 40px; padding: 4px 16px; border-radius: 0;
-                                   color: #AAB4B1; background: transparent; border: 0;
+                                   color: #6F7168; background: transparent; border: 0;
                                    border-bottom: 2px solid transparent; }
-            QPushButton#shellNav:hover { color: #E8ECEB; background: #222627; border-bottom: 2px solid #535A56; }
-            QPushButton#shellNav:checked { color: #DDE8D9; background: transparent; border: 0;
-                                           border-bottom: 2px solid #78936B; }
-            QLabel#accountManagerTitle { color: #E8ECEB; font-size: 28px; font-weight: 700; }
-            QLabel#accountManagerSubtitle { color: #AAB4B1; font-size: 13px; }
-            QLabel#accountManagerCount { color: #DDE8D9; font-size: 12px; font-weight: 700; }
-            QLabel#accountManagerNote, QLabel#accountEmpty { color: #8E9994; font-size: 11px; }
-            QFrame#walletAccountRow { background: #1B2020; border: 1px solid #343B39; border-radius: 10px; }
-            QFrame#walletAccountRow:hover { border-color: #687B65; background: #202626; }
-            QLabel#walletAddress { color: #E8ECEB; font-family: Consolas; font-size: 12px; }
-            QPushButton#walletCopyAddress { min-height:0; max-height:28px; padding:4px 8px; color:#A9C99F;
-                background:transparent; border:0; border-radius:7px; font-size:11px; font-weight:600; }
-            QPushButton#walletCopyAddress:hover { color:#DDE8D9; background:#29332E; }
-            QPushButton#walletCopyAddress:pressed { background:#34443A; }
-            QLabel#walletAccountState { color: #8E9994; font-size: 10px; }
-            QLabel#walletAccountDetails { color: #C5CECA; font-size: 11px; }
+            QPushButton#shellNav:hover { color: #292C26; background: #F3EFE6; border-bottom: 2px solid #D6C8AD; }
+            QPushButton#shellNav:checked { color: #292C26; background: transparent; border: 0;
+                                           border-bottom: 2px solid #63815E; }
+            QLabel#accountManagerTitle { color: #292C26; font-size: 28px; font-weight: 700; }
+            QLabel#accountManagerSubtitle { color: #6F7168; font-size: 13px; }
+            QLabel#accountManagerCount { color: #8A642F; font-size: 12px; font-weight: 700; }
+            QLabel#accountManagerNote, QLabel#accountEmpty { color: #77776E; font-size: 11px; }
+            QFrame#walletAccountRow { background: #FBF9F4; border: 1px solid #DED7CA; border-radius: 12px; }
+            QFrame#walletAccountRow:hover { border-color: #A7B49B; background: #FFFFFF; }
+            QLabel#walletAddress { color: #292C26; font-family: Consolas; font-size: 12px; }
+            QLabel#walletAccountState { color: #73766D; font-size: 10px; background:#F1EEE7;
+                border:1px solid #E4DFD5; border-radius:9px; padding:2px 7px; }
+            QPushButton#walletCopyAddress { min-height:40px; padding:0 12px; color:#4E654C;
+                background:#F8F5EE; border:1px solid #CDD5C8; border-radius:8px; font-size:12px; font-weight:600; }
+            QPushButton#walletCopyAddress:hover { color:#38553C; background:#EDF3E9; border-color:#89A184; }
+            QPushButton#walletCopyAddress:pressed { background:#DFE9D9; }
+            QPushButton#primaryButton { background:#5B7C55; color:#FFFFFF; border:1px solid #52734D; border-radius:8px; }
+            QPushButton#primaryButton:hover { background:#496B47; border-color:#496B47; }
+            QPushButton#secondaryButton { background:#F3EFE6; color:#514630; border:1px solid #CDBD9F; border-radius:8px; }
+            QPushButton#secondaryButton:hover { background:#ECE4D4; border-color:#B99B67; }
+            QLabel#walletAccountDetails { color: #555A51; font-size: 11px; }
             QLabel#walletStatusDot { border-radius: 5px; }
-            QFrame#multiAccountPlanner { background:#1B2020; border:1px solid #343B39; border-radius:10px; }
-            QLabel#plannerTitle { color:#E8ECEB; font-size:14px; font-weight:700; }
-            QLabel#plannerHint { color:#8E9994; font-size:11px; }
+            QFrame#multiAccountPlanner { background:#FBF9F4; border:1px solid #DED7CA; border-radius:12px; }
+            QLabel#plannerTitle { color:#292C26; font-size:14px; font-weight:700; }
+            QLabel#plannerHint { color:#77776E; font-size:11px; }
             QWidget#plannerAccountsContent { background:transparent; }
             QScrollArea#plannerAccountsScroll, QScrollArea#plannerAccountsScroll > QWidget#qt_scrollarea_viewport {
                 background:transparent; border:0;
             }
-            QFrame#multiAccountPlanner QCheckBox { color:#C5CECA; font-size:12px; spacing:7px; padding:2px 4px; }
-            QFrame#multiAccountPlanner QCheckBox:hover { color:#E8ECEB; }
-            QFrame#multiAccountPlanner QCheckBox::indicator { width:15px; height:15px; border:1px solid #59635F;
-                                                                border-radius:4px; background:#151919; }
-            QFrame#multiAccountPlanner QCheckBox::indicator:hover { border-color:#78936B; }
-            QFrame#multiAccountPlanner QCheckBox::indicator:checked { background:#287A50; border-color:#3D9A68; }
-            QCheckBox#plannerAccountCheck { color:#C5CECA; font-size:12px; spacing:7px; padding:2px 4px; }
-            QCheckBox#plannerAccountCheck:hover { color:#E8ECEB; }
-            QCheckBox#plannerAccountCheck::indicator { width:15px; height:15px; border:1px solid #59635F;
-                                                        border-radius:4px; background:#151919; }
-            QCheckBox#plannerAccountCheck::indicator:hover { border-color:#78936B; }
-            QCheckBox#plannerAccountCheck::indicator:checked { background:#287A50; border-color:#3D9A68; }
-            QCheckBox#plannerAccountCheck::indicator:disabled { background:#252B29; border-color:#404744; }
+            QFrame#multiAccountPlanner QCheckBox { color:#454940; font-size:12px; spacing:8px; padding:2px 4px; }
+            QFrame#multiAccountPlanner QCheckBox:hover { color:#292C26; }
+            QFrame#multiAccountPlanner QCheckBox::indicator { width:15px; height:15px; border:1px solid #B8B5AA;
+                                                                border-radius:4px; background:#FFFFFF; }
+            QFrame#multiAccountPlanner QCheckBox::indicator:hover { border-color:#63815E; }
+            QFrame#multiAccountPlanner QCheckBox::indicator:checked { background:#63815E; border-color:#63815E; }
+            QCheckBox#plannerAccountCheck { color:#454940; font-size:12px; spacing:7px; padding:2px 7px;
+                background:#FFFFFF; border:1px solid #DED7CA; border-radius:8px; }
+            QCheckBox#plannerAccountCheck:hover { color:#292C26; border-color:#A7B49B; }
+            QCheckBox#plannerAccountCheck::indicator { width:15px; height:15px; border:1px solid #B8B5AA;
+                                                        border-radius:4px; background:#FFFFFF; }
+            QCheckBox#plannerAccountCheck::indicator:hover { border-color:#63815E; }
+            QCheckBox#plannerAccountCheck::indicator:checked { background:#63815E; border-color:#63815E; }
+            QCheckBox#plannerAccountCheck::indicator:disabled { background:#EEEAE1; border-color:#D7D0C4; }
             QComboBox#plannerMode, QSpinBox#plannerLevelSpin {
-                color:#DCE3E0; background:#171C1C; border:1px solid #3A4440; border-radius:8px;
-                min-height:38px; padding:0 10px;
+                color:#373A33; background:#FFFFFF; border:1px solid #D5CEBF; border-radius:8px;
+                min-height:40px; padding:0 10px;
             }
-            QComboBox#plannerMode:hover, QSpinBox#plannerLevelSpin:hover { border-color:#61775C; }
+            QComboBox#plannerMode:hover, QSpinBox#plannerLevelSpin:hover { border-color:#8A9E80; }
             QComboBox#plannerMode::drop-down { width:28px; border:0; }
             QComboBox#plannerMode QAbstractItemView {
-                color:#DCE3E0; background:#202626; selection-background-color:#31543D;
-                border:1px solid #3A4440; outline:0;
+                color:#373A33; background:#FFFFFF; selection-background-color:#E4EBDC;
+                border:1px solid #D5CEBF; outline:0;
             }
-            QSpinBox#plannerLevelSpin:disabled { color:#727D78; background:#1B2020; border-color:#303735; }
+            QSpinBox#plannerLevelSpin:disabled { color:#92938B; background:#F0EDE6; border-color:#DED7CA; }
             QSpinBox#plannerLevelSpin::up-button, QSpinBox#plannerLevelSpin::down-button {
-                width:18px; background:#202626; border:0;
+                width:18px; background:#F3EFE6; border:0;
             }
             QSpinBox#plannerLevelSpin::up-button:hover, QSpinBox#plannerLevelSpin::down-button:hover {
-                background:#2A3430;
+                background:#E8E3D8;
             }
         """)
         root = QWidget()
@@ -364,8 +370,8 @@ class DesktopWindow(QMainWindow):
     def build_account_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(16)
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(12)
         heading = QLabel('账号中心')
         heading.setObjectName('accountManagerTitle')
         layout.addWidget(heading)
@@ -422,11 +428,11 @@ class DesktopWindow(QMainWindow):
         title = QLabel('多账号任务编排')
         title.setObjectName('plannerTitle')
         heading.addWidget(title)
-        heading.addStretch(1)
         self.planner_select_all = QCheckBox('全选账号')
         self.planner_select_all.setObjectName('plannerSelectAll')
         self.planner_select_all.toggled.connect(self.set_all_planner_accounts)
         heading.addWidget(self.planner_select_all)
+        heading.addStretch(1)
         layout.addLayout(heading)
 
         self.planner_account_checks = {}
@@ -435,7 +441,7 @@ class DesktopWindow(QMainWindow):
         self.planner_accounts_content.setStyleSheet('background:transparent;')
         self.planner_accounts_layout = QGridLayout(self.planner_accounts_content)
         self.planner_accounts_layout.setContentsMargins(2, 0, 2, 0)
-        self.planner_accounts_layout.setHorizontalSpacing(12)
+        self.planner_accounts_layout.setHorizontalSpacing(9)
         self.planner_accounts_layout.setVerticalSpacing(2)
         account_scroll = QScrollArea()
         account_scroll.setObjectName('plannerAccountsScroll')
@@ -485,6 +491,26 @@ class DesktopWindow(QMainWindow):
         self.planner_level_max.setEnabled(False)
         layout.addLayout(controls)
 
+        post_quest_controls = QHBoxLayout()
+        self.planner_farm_after_quests = QCheckBox('任务做完后继续刷图')
+        self.planner_farm_after_quests.setToolTip('自动任务没有下一项可接时，前往指定地图继续刷怪；复活后也会返回。')
+        post_quest_controls.addWidget(self.planner_farm_after_quests)
+        self.planner_farm_map = QComboBox()
+        self.planner_farm_map.setObjectName('plannerFarmMap')
+        for map_id, name in MAP_NAMES.items():
+            if map_id != 1:
+                self.planner_farm_map.addItem(name, map_id)
+        saved_map_index = self.planner_farm_map.findData(2)
+        if saved_map_index >= 0:
+            self.planner_farm_map.setCurrentIndex(saved_map_index)
+        self.planner_farm_map.setMinimumWidth(185)
+        post_quest_controls.addWidget(self.planner_farm_map)
+        self.planner_avoid_contested = QCheckBox('避开附近有玩家的怪')
+        self.planner_avoid_contested.setToolTip('跳过服务端最近上报的位置中，180 游戏单位范围内有其他玩家的怪物。')
+        post_quest_controls.addWidget(self.planner_avoid_contested)
+        post_quest_controls.addStretch(1)
+        layout.addLayout(post_quest_controls)
+
         actions = QHBoxLayout()
         self.planner_start = QPushButton('启动所选账号')
         self.planner_start.setObjectName('primaryButton')
@@ -523,13 +549,16 @@ class DesktopWindow(QMainWindow):
                 widget.deleteLater()
         self.planner_account_checks = {}
         addresses = self.sorted_wallet_addresses(self.game.credential_vault.list_wallets())
-        columns = 8
+        # Balanced rows avoid a single stretched gray band on Windows and
+        # keep a small account set from looking like an empty spreadsheet.
+        columns = min(6, max(1, len(addresses)))
         for index, address in enumerate(addresses):
             suffix = address[-3:]
             box = QCheckBox(f'尾号 {suffix}')
             box.setObjectName('plannerAccountCheck')
-            box.setMinimumHeight(24)
-            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            box.setMinimumHeight(26)
+            box.setFixedWidth(136)
+            box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             box.setToolTip(address)
             box.setChecked(selected.get(address, selected.get(address.lower(), False)))
             box.toggled.connect(self.update_planner_select_all)
@@ -692,6 +721,13 @@ class DesktopWindow(QMainWindow):
             game.quest_map_auto.setChecked(mode == 'quests')
             game.elite_only.setChecked(mode == 'elite')
             game.task_limited_mode.setChecked(False)
+            farm_map = self.planner_farm_map.currentData()
+            if farm_map is not None:
+                farm_map_index = game.no_quest_farm_map.findData(farm_map)
+                if farm_map_index >= 0:
+                    game.no_quest_farm_map.setCurrentIndex(farm_map_index)
+            game.no_quest_farm.setChecked(self.planner_farm_after_quests.isChecked())
+            game.avoid_contested_monsters.setChecked(self.planner_avoid_contested.isChecked())
             game.auto_attack.setChecked(True)
             if mode == 'quests':
                 game.accept_next_monster_quest()
@@ -822,11 +858,13 @@ class DesktopWindow(QMainWindow):
         for address in addresses:
             row = QFrame()
             row.setObjectName('walletAccountRow')
+            row.setMinimumHeight(72)
+            row.setMaximumHeight(104)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(14, 11, 14, 11)
-            row_layout.setSpacing(14)
+            row_layout.setContentsMargins(14, 9, 14, 9)
+            row_layout.setSpacing(12)
             identity = QVBoxLayout()
-            identity.setSpacing(4)
+            identity.setSpacing(3)
             address_row = QHBoxLayout()
             address_row.setSpacing(8)
             dot = QLabel()
@@ -835,11 +873,12 @@ class DesktopWindow(QMainWindow):
             address_label = QLabel(self.compact_wallet_address(address))
             address_label.setObjectName('walletAddress')
             address_label.setToolTip(address)
+            address_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
             address_row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
-            address_row.addWidget(address_label, 1)
+            address_row.addWidget(address_label)
             copy_address = QPushButton('复制地址')
             copy_address.setObjectName('walletCopyAddress')
-            copy_address.setFixedSize(96, 30)
+            copy_address.setFixedSize(112, 40)
             copy_address.setToolTip('复制完整钱包地址')
             copy_address.clicked.connect(
                 lambda _checked=False, wallet=address, button=copy_address:
@@ -861,13 +900,17 @@ class DesktopWindow(QMainWindow):
             dot.setToolTip(state_text)
             state_label = QLabel(state_text)
             state_label.setObjectName('walletAccountState')
-            identity.addWidget(state_label)
+            state_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            state_label.setFixedWidth(state_label.sizeHint().width())
+            address_row.addWidget(state_label)
+            address_row.addStretch(1)
             details = self.account_summary(session, self._account_last_maps.get(address.lower()))
             details_label = QLabel(details or ('角色资料将在登录后显示' if session else '尚未登录'))
             details_label.setObjectName('walletAccountDetails')
             details_label.setWordWrap(True)
             identity.addWidget(details_label)
             row_layout.addLayout(identity, 1)
+            row_layout.setAlignment(identity, Qt.AlignmentFlag.AlignVCenter)
             if session_state in self.SESSION_BUSY_STATES - {'已连接'}:
                 action_text = '连接中…'
             elif is_active and session_state == '已连接':
@@ -880,7 +923,11 @@ class DesktopWindow(QMainWindow):
                 action_text = '切换并连接'
             action = QPushButton(action_text)
             action.setObjectName('secondaryButton' if is_active else 'primaryButton')
-            action.setMinimumHeight(38)
+            action.setMinimumHeight(40)
+            if is_active:
+                action.setStyleSheet("QPushButton { background:#F3EFE6; color:#514630; border:1px solid #CDBD9F; border-radius:8px; font-weight:600; } QPushButton:hover { background:#ECE4D4; border-color:#B99B67; }")
+            else:
+                action.setStyleSheet("QPushButton { background:#5B7C55; color:#FFFFFF; border:1px solid #52734D; border-radius:8px; font-weight:600; } QPushButton:hover { background:#496B47; border-color:#496B47; }")
             action.setEnabled(session_state not in self.SESSION_BUSY_STATES - {'已连接'})
             if not is_active and session_state == '已连接':
                 action.setToolTip('只切换当前控制台；这个账号和其他账号的游戏连接都会保持在线。')
@@ -891,10 +938,12 @@ class DesktopWindow(QMainWindow):
             else:
                 action.setToolTip('重新连接当前账号；其他账号连接保持不变。')
             action.clicked.connect(lambda _checked=False, wallet=address: self.connect_account(wallet))
-            actions = QVBoxLayout()
+            action.setFixedSize(176, 40)
+            actions = QHBoxLayout()
             actions.setContentsMargins(0, 0, 0, 0)
-            actions.setSpacing(7)
-            actions.addWidget(copy_address, 0, Qt.AlignmentFlag.AlignRight)
+            actions.setSpacing(10)
+            actions.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            actions.addWidget(copy_address)
             actions.addWidget(action)
             row_layout.addLayout(actions)
             self.account_rows.addWidget(row)
@@ -1335,6 +1384,7 @@ class DesktopWindow(QMainWindow):
             dialog = QMessageBox(self)
             dialog.setWindowTitle('更新已下载')
             dialog.setText('更新包已下载并校验。点击“立即重启安装”后，应用会关闭、替换程序文件并重新启动。')
+            dialog.setInformativeText('安装器会等待当前程序退出后替换文件。若安装失败，会尝试恢复旧版本并显示错误；详细记录保存在 %LOCALAPPDATA%\\TabbyDesktop\\update.log。')
             dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             dialog.button(QMessageBox.StandardButton.Yes).setText('立即重启安装')
             dialog.button(QMessageBox.StandardButton.No).setText('稍后')
