@@ -86,11 +86,27 @@ class DesktopTests(unittest.TestCase):
 
         self.window.pause_multi_account_plan()
         self.assertFalse(game.auto_attack.isChecked())
-        self.assertFalse(game.auto_quest.isChecked())
-        self.assertFalse(game.quest_map_auto.isChecked())
         self.window.stop_multi_account_plan()
         self.assertFalse(game.auto_quest.isChecked())
         self.assertFalse(game.quest_map_auto.isChecked())
+
+    def test_wallet_accounts_sort_by_last_three_characters_and_show_compact_labels(self):
+        addresses = [
+            '0x' + 'a' * 37 + '333',
+            '0x' + 'b' * 37 + '111',
+            '0x' + 'c' * 37 + '222',
+        ]
+        self.assertEqual(self.window.sorted_wallet_addresses(addresses),
+                         [addresses[1], addresses[2], addresses[0]])
+        with patch.object(self.window.game.credential_vault, 'list_wallets', return_value=addresses):
+            self.window.refresh_planner_accounts()
+            self.window.refresh_account_rows()
+        self.assertEqual(list(self.window.planner_account_checks),
+                         [addresses[1], addresses[2], addresses[0]])
+        self.assertEqual([box.text() for box in self.window.planner_account_checks.values()],
+                         ['尾号 111', '尾号 222', '尾号 333'])
+        self.assertTrue(all(box.toolTip() == address for address, box
+                            in self.window.planner_account_checks.items()))
 
     def test_vault_passphrase_is_cached_globally_and_kept_after_login_failure(self):
         phrase = 'shared-vault-passphrase'

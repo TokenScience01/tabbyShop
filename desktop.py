@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
                               QStackedWidget, QButtonGroup, QDialog, QMessageBox,
                               QFrame, QPlainTextEdit, QInputDialog, QLineEdit,
-                              QScrollArea, QCheckBox, QComboBox, QSpinBox)
+                              QScrollArea, QCheckBox, QComboBox, QSpinBox, QSizePolicy)
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
@@ -139,6 +139,34 @@ class DesktopWindow(QMainWindow):
             QFrame#multiAccountPlanner { background:#1B2020; border:1px solid #343B39; border-radius:10px; }
             QLabel#plannerTitle { color:#E8ECEB; font-size:14px; font-weight:700; }
             QLabel#plannerHint { color:#8E9994; font-size:11px; }
+            QWidget#plannerAccountsContent { background:transparent; }
+            QScrollArea#plannerAccountsScroll, QScrollArea#plannerAccountsScroll > QWidget#qt_scrollarea_viewport {
+                background:transparent; border:0;
+            }
+            QCheckBox#plannerAccountCheck { color:#C5CECA; font-size:12px; spacing:7px; padding:2px 4px; }
+            QCheckBox#plannerAccountCheck:hover { color:#E8ECEB; }
+            QCheckBox#plannerAccountCheck::indicator { width:15px; height:15px; border:1px solid #59635F;
+                                                        border-radius:4px; background:#151919; }
+            QCheckBox#plannerAccountCheck::indicator:hover { border-color:#78936B; }
+            QCheckBox#plannerAccountCheck::indicator:checked { background:#287A50; border-color:#3D9A68; }
+            QCheckBox#plannerAccountCheck::indicator:disabled { background:#252B29; border-color:#404744; }
+            QComboBox#plannerMode, QSpinBox#plannerLevelSpin {
+                color:#DCE3E0; background:#171C1C; border:1px solid #3A4440; border-radius:8px;
+                min-height:38px; padding:0 10px;
+            }
+            QComboBox#plannerMode:hover, QSpinBox#plannerLevelSpin:hover { border-color:#61775C; }
+            QComboBox#plannerMode::drop-down { width:28px; border:0; }
+            QComboBox#plannerMode QAbstractItemView {
+                color:#DCE3E0; background:#202626; selection-background-color:#31543D;
+                border:1px solid #3A4440; outline:0;
+            }
+            QSpinBox#plannerLevelSpin:disabled { color:#727D78; background:#1B2020; border-color:#303735; }
+            QSpinBox#plannerLevelSpin::up-button, QSpinBox#plannerLevelSpin::down-button {
+                width:18px; background:#202626; border:0;
+            }
+            QSpinBox#plannerLevelSpin::up-button:hover, QSpinBox#plannerLevelSpin::down-button:hover {
+                background:#2A3430;
+            }
         """)
         root = QWidget()
         root.setObjectName('root')
@@ -380,22 +408,26 @@ class DesktopWindow(QMainWindow):
 
         self.planner_account_checks = {}
         self.planner_accounts_content = QWidget()
-        self.planner_accounts_layout = QHBoxLayout(self.planner_accounts_content)
-        self.planner_accounts_layout.setContentsMargins(0, 0, 0, 0)
-        self.planner_accounts_layout.setSpacing(12)
-        self.planner_accounts_layout.addWidget(QLabel('请先导入钱包'))
-        self.planner_accounts_layout.addStretch(1)
+        self.planner_accounts_content.setObjectName('plannerAccountsContent')
+        self.planner_accounts_layout = QGridLayout(self.planner_accounts_content)
+        self.planner_accounts_layout.setContentsMargins(2, 0, 2, 0)
+        self.planner_accounts_layout.setHorizontalSpacing(12)
+        self.planner_accounts_layout.setVerticalSpacing(2)
         account_scroll = QScrollArea()
+        account_scroll.setObjectName('plannerAccountsScroll')
         account_scroll.setWidgetResizable(True)
         account_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        account_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        account_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         account_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        account_scroll.setMaximumHeight(38)
+        account_scroll.setMinimumHeight(32)
+        account_scroll.setMaximumHeight(40)
+        self.planner_accounts_scroll = account_scroll
         account_scroll.setWidget(self.planner_accounts_content)
         layout.addWidget(account_scroll)
 
         controls = QHBoxLayout()
         self.planner_mode = QComboBox()
+        self.planner_mode.setObjectName('plannerMode')
         self.planner_mode.addItem('自动任务：接任务并按任务地图战斗', 'quests')
         self.planner_mode.addItem('自由刷怪：留在各账号当前地图', 'farm')
         self.planner_mode.addItem('精英狩猎：只攻击精英怪', 'elite')
@@ -407,11 +439,15 @@ class DesktopWindow(QMainWindow):
         self.planner_limit_level = QCheckBox('等级范围')
         controls.addWidget(self.planner_limit_level)
         self.planner_level_min = QSpinBox()
+        self.planner_level_min.setObjectName('plannerLevelSpin')
+        self.planner_level_min.setFixedWidth(142)
         self.planner_level_min.setRange(1, 9999)
         self.planner_level_min.setPrefix('最低 ')
         self.planner_level_min.setValue(1)
         controls.addWidget(self.planner_level_min)
         self.planner_level_max = QSpinBox()
+        self.planner_level_max.setObjectName('plannerLevelSpin')
+        self.planner_level_max.setFixedWidth(142)
         self.planner_level_max.setRange(1, 9999)
         self.planner_level_max.setPrefix('最高 ')
         self.planner_level_max.setValue(9999)
@@ -451,19 +487,33 @@ class DesktopWindow(QMainWindow):
             if widget:
                 widget.deleteLater()
         self.planner_account_checks = {}
-        addresses = self.game.credential_vault.list_wallets()
-        for address in addresses:
-            box = QCheckBox(address[:8] + '…' + address[-6:])
+        addresses = self.sorted_wallet_addresses(self.game.credential_vault.list_wallets())
+        columns = 8
+        for index, address in enumerate(addresses):
+            suffix = address[-3:]
+            box = QCheckBox(f'尾号 {suffix}')
+            box.setObjectName('plannerAccountCheck')
+            box.setMinimumHeight(24)
+            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             box.setToolTip(address)
             box.setChecked(selected.get(address, selected.get(address.lower(), False)))
             box.toggled.connect(self.update_planner_select_all)
             self.planner_account_checks[address] = box
-            self.planner_accounts_layout.addWidget(box)
-        self.planner_accounts_layout.addStretch(1)
+            self.planner_accounts_layout.addWidget(box, index // columns, index % columns)
+        if not addresses:
+            empty = QLabel('请先导入钱包')
+            empty.setObjectName('plannerHint')
+            self.planner_accounts_layout.addWidget(empty, 0, 0)
         self.planner_select_all.blockSignals(True)
         self.planner_select_all.setChecked(bool(addresses) and all(
             box.isChecked() for box in self.planner_account_checks.values()))
         self.planner_select_all.blockSignals(False)
+
+    @staticmethod
+    def sorted_wallet_addresses(addresses):
+        """Sort account listings by the wallet address's final three characters."""
+        return sorted(addresses, key=lambda address: (str(address)[-3:].casefold(),
+                                                       str(address).casefold()))
 
     def set_all_planner_accounts(self, checked):
         for box in self.planner_account_checks.values():
@@ -580,7 +630,7 @@ class DesktopWindow(QMainWindow):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
-        addresses = self.game.credential_vault.list_wallets()
+        addresses = self.sorted_wallet_addresses(self.game.credential_vault.list_wallets())
         self.refresh_planner_accounts()
         self.account_count.setText(f'{len(addresses)} 个账号')
         self.account_empty.setVisible(not addresses)
