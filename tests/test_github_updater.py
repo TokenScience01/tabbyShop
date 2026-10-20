@@ -14,6 +14,34 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertEqual(updater.version_tuple('v2.10.3'), (2, 10, 3, 0))
         self.assertGreater(updater.version_tuple('1.2.10'), updater.version_tuple('1.2.9'))
         self.assertEqual(updater.version_tuple('1.2'), updater.version_tuple('1.2.0'))
+        self.assertEqual(updater.APP_VERSION, '1.2.10')
+
+    def test_update_script_logs_failures_and_restores_previous_install(self):
+        install_dir = Path('C:/Users/test/App/TabbyDesktop')
+        stage = install_dir.parent / '.tabby-update-test'
+        script = updater._windows_update_script(
+            stage, stage / 'TabbyDesktop', install_dir,
+            install_dir.with_name('TabbyDesktop.previous'), 1234)
+
+        self.assertIn('move "%STAGED%" "%TARGET%"', script)
+        self.assertIn('goto rollback', script)
+        self.assertIn('move "%BACKUP%" "%TARGET%"', script)
+        self.assertIn('update.log', script)
+        self.assertIn('start "" "%EXE%"', script)
+        self.assertIn('set "APP_PID=1234"', script)
+
+    def test_update_launcher_quotes_script_paths_for_cmd_with_spaces(self):
+        class WindowsScriptPath:
+            def resolve(self):
+                return Path(r'C:\Program Files\Tabby\.tabby-update\install-update.bat')
+
+        with patch.object(updater.os, 'name', 'nt'), \
+             patch.object(updater.subprocess, 'Popen') as popen:
+            updater.launch_update_script(WindowsScriptPath())
+
+        command = popen.call_args.args[0]
+        self.assertIn('/d /s /c', command)
+        self.assertIn('""C:\\Program Files\\Tabby\\.tabby-update\\install-update.bat""', command)
 
     def test_latest_release_identifies_newer_version_and_windows_asset(self):
         response = {

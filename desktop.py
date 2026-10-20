@@ -228,6 +228,9 @@ class DesktopWindow(QMainWindow):
         # The desktop monitor reads the same in-memory token used by the game.
         shop.read_token = lambda: ('Bearer ' + self._token) if self._token else ''
         shop.save_token = lambda value: None
+        # Monitor work runs in a background thread; use a Qt signal to deliver
+        # shop events onto the GUI thread before reading the saved webhook.
+        shop.MONITOR.event_callback = self.game.bridge.shop_notification.emit
 
     def check_for_updates(self):
         if self._update_thread and self._update_thread.is_alive():
@@ -310,14 +313,20 @@ class DesktopWindow(QMainWindow):
         try:
             app_dir = Path(sys.executable).resolve().parent
             script = prepare_windows_update(Path(archive_path), app_dir)
-            answer = QMessageBox.information(
-                self, '更新已下载', '更新包已下载并校验。点击“立即重启”完成安装。',
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Ok,
-            )
-            if answer == QMessageBox.StandardButton.Ok:
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle('更新已下载')
+            dialog.setText('更新包已下载并校验。点击“立即重启安装”后，应用会关闭、替换程序文件并重新启动。')
+            dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            dialog.button(QMessageBox.StandardButton.Yes).setText('立即重启安装')
+            dialog.button(QMessageBox.StandardButton.No).setText('稍后')
+            answer = dialog.exec()
+            if answer == QMessageBox.StandardButton.Yes:
                 launch_update_script(script)
                 self.close()
+        except PermissionError:
+            self.on_update_failed(
+                '无法写入当前程序目录。请将 TabbyDesktop 文件夹移动到当前 Windows 用户可写入的位置后重试，'
+                '或以管理员身份运行应用。')
         except Exception as exc:
             self.on_update_failed(f'{type(exc).__name__}: {exc}')
 

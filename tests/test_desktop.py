@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from unittest.mock import patch
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel, QMessageBox,
                                QPushButton, QTableWidget, QTabWidget)
-from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer
+from PySide6.QtCore import QEventLoop, QItemSelectionModel, QSettings, QTimer
 from PySide6.QtGui import QImage
 from desktop import DesktopWindow, shop
 from credential_vault import CredentialVault
@@ -403,6 +403,113 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(game.auto_potion.isChecked())
         self.assertEqual(game.quest_table.maximumHeight(), 16777215)
         self.assertEqual(game.character_card.sizePolicy().verticalPolicy().name, 'Preferred')
+
+    def test_fatigue_logout_is_optional_and_triggers_once_at_zero(self):
+        game = self.window.game
+        previous_settings = game.settings
+        temporary_settings = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_settings.cleanup)
+        self.addCleanup(setattr, game, 'settings', previous_settings)
+        game.settings = QSettings(str(Path(temporary_settings.name) / 'settings.ini'),
+                                  QSettings.Format.IniFormat)
+        game.logout_on_fatigue.setChecked(False)
+        self.assertFalse(game.logout_on_fatigue.isChecked())
+        with patch.object(game, 'send_lark_notification') as notify, \
+             patch.object(game, 'disconnect_ws') as disconnect:
+            game.handle_fatigue_state({'farming': {'staminaPercent': 2}})
+            disconnect.assert_not_called()
+            game.handle_fatigue_state({'farming': {'staminaPercent': 0}})
+            game.handle_fatigue_state({'farming': {'staminaPercent': 0}})
+            disconnect.assert_not_called()
+            self.assertEqual(notify.call_count, 1)
+            self.assertEqual(notify.call_args.args[0], '疲劳值已耗尽')
+
+        game._fatigue_exhaustion_handled = False
+        game.logout_on_fatigue.setChecked(True)
+        game.session_token = 'session-to-clear'
+        game.token.setText('session-to-clear')
+        with patch.object(game, 'disconnect_ws') as disconnect:
+            game.handle_fatigue_state({'farming': {'staminaPercent': 0}})
+        disconnect.assert_called_once()
+        self.assertEqual(game.session_token, '')
+        self.assertEqual(game.token.text(), '')
+        game.logout_on_fatigue.setChecked(False)
+
+    def test_lark_webhook_is_masked_and_persisted_in_local_settings(self):
+        game = self.window.game
+        previous_settings = game.settings
+        temporary_settings = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_settings.cleanup)
+        self.addCleanup(setattr, game, 'settings', previous_settings)
+        game.settings = QSettings(str(Path(temporary_settings.name) / 'settings.ini'),
+                                  QSettings.Format.IniFormat)
+        self.assertEqual(game.lark_webhook.echoMode().name, 'Password')
+        game.lark_webhook.setText('https://open.larksuite.com/open-apis/bot/v2/hook/test-secret')
+        self.assertEqual(game.settings.value('larkWebhook', ''),
+                         'https://open.larksuite.com/open-apis/bot/v2/hook/test-secret')
+        self.assertIn('已保存', game.lark_status.text())
+        checkbox = game.notification_preferences['purchase']
+        checkbox.setChecked(False)
+        self.assertFalse(game.settings.value('notifyPurchaseSuccess', True, type=bool))
+        checkbox.setChecked(True)
+        self.assertTrue(game.settings.value('notifyPurchaseSuccess', False, type=bool))
+        game.lark_webhook.clear()
+        self.assertEqual(game.settings.value('larkWebhook', ''), '')
+
+    def test_notification_preferences_are_available_in_the_new_top_level_tab(self):
+        game = self.window.game
+        top_tabs = next(tab for tab in self.window.findChildren(QTabWidget)
+                        if tab.count() == 6 and tab.tabText(5) == '推送设置')
+        self.assertEqual(top_tabs.tabText(5), '推送设置')
+        self.assertEqual(set(game.notification_preferences),
+                         {'equipment', 'quest', 'fatigue', 'purchase', 'sale'})
+        self.assertTrue(all(option.isChecked()
+                            for option in game.notification_preferences.values()))
+
+    def test_shop_event_callback_forwards_purchase_and_sale_notifications(self):
+        monitor = object.__new__(shop.ShopMonitor)
+        events = []
+        monitor.lock = threading.RLock()
+        monitor.buy_lock = threading.Lock()
+        monitor.attempted_products = set()
+        monitor.auto_buy_enabled = True
+        monitor.buy_count = 0
+        monitor.buy_total = 0
+        monitor.events = []
+        monitor._persist = lambda: None
+        monitor.event_callback = lambda *event: events.append(event)
+        with patch.object(shop, 'execute_purchase', return_value={'amount': 12, 'txHash': '0xabc'}):
+            monitor._process_candidate(
+                {'id': 15, 'itemName': '冰霜长剑'}, {'maxCount': 1, 'budget': 100})
+        monitor.emit_event('sale', '出售成功', '商品名称')
+        self.assertEqual([event[0] for event in events], ['purchase', 'sale'])
+        self.assertEqual(events[0][1], '秒购交易已提交')
+        self.assertIn('0xabc', events[0][2])
+
+    def test_task_and_equipment_notifications_only_report_new_events(self):
+        game = self.window.game
+        quest = {'id': 55, 'titleZh': '雪地讨伐', 'mapId': 2, 'accepted': True,
+                 'completed': False, 'objectiveType': 'MONSTER', 'progress': 0, 'target': 10}
+        with patch.object(game, 'send_lark_notification') as notify, \
+             patch.object(game, 'accept_next_monster_quest'):
+            game.update_quests([quest])
+            game.update_quests([{**quest, 'completed': True, 'progress': 10}])
+            game.update_quests([{**quest, 'completed': True, 'progress': 10}])
+            self.assertEqual(notify.call_count, 1)
+            self.assertEqual(notify.call_args.args[0], '任务完成')
+            self.assertIn('雪地讨伐', notify.call_args.args[1])
+
+            equipment = {'items': [{'playerItemId': 'drop-1', 'itemKind': 'EQUIPMENT',
+                                    'itemName': '冰霜长剑', 'slotType': 'WEAPON',
+                                    'attributes': []}]}
+            game.notify_new_equipment(equipment)  # Initial inventory is only a baseline.
+            self.assertEqual(notify.call_count, 1)
+            game.notify_new_equipment({'items': [*equipment['items'], {
+                'playerItemId': 'drop-2', 'itemKind': 'EQUIPMENT', 'itemName': '新护甲',
+                'slotType': 'ARMOR', 'attributes': []}]})
+            self.assertEqual(notify.call_count, 2)
+            self.assertEqual(notify.call_args.args[0], '装备掉落')
+            self.assertIn('新护甲', notify.call_args.args[1])
 
     def test_monster_level_range_is_opt_in_and_filters_combat_targets(self):
         game = self.window.game

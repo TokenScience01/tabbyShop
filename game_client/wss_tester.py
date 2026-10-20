@@ -226,6 +226,8 @@ class Bridge(QObject):
     signed_login = Signal(object)
     sign_challenge = Signal(object)
     keyring_status = Signal(str)
+    notification_result = Signal(str, bool, str)
+    shop_notification = Signal(str, str, str)
 
 
 MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地",
@@ -434,6 +436,8 @@ class MainWindow(QMainWindow):
         self.bridge.profile.connect(self.accept_profile_data)
         self.bridge.signed_login.connect(self.finish_signed_login)
         self.bridge.sign_challenge.connect(self.confirm_sign_challenge)
+        self.bridge.notification_result.connect(self.on_notification_result)
+        self.bridge.shop_notification.connect(self.on_shop_notification)
         self.ws: MiniWebSocket | None = None
         self.reader: threading.Thread | None = None
         self.session_token = ""
@@ -448,6 +452,9 @@ class MainWindow(QMainWindow):
         self.auth_rejected = False
         self._auth_retry_attempted = False
         self.settings = QSettings("Tabby", "TabbyDesktop")
+        self._fatigue_exhaustion_handled = False
+        self._quest_notification_state = None
+        self._known_equipment_ids = None
         self.reset_world_state()
         self.keepalive = QTimer(self)
         self.keepalive.setInterval(2000)
@@ -1574,6 +1581,83 @@ class MainWindow(QMainWindow):
         social_box.addWidget(social_tabs, 1)
         tabs.addTab(social_page, "角色与社交")
         tabs.currentChanged.connect(lambda index: self.refresh_social_data() if tabs.widget(index) is social_page else None)
+        notification_page = QWidget()
+        notification_layout = QVBoxLayout(notification_page)
+        notification_layout.setContentsMargins(10, 12, 10, 10)
+        notification_layout.setSpacing(12)
+        notification_card = QFrame()
+        notification_card.setObjectName("card")
+        notification_card_layout = QVBoxLayout(notification_card)
+        notification_card_layout.setContentsMargins(18, 16, 18, 18)
+        notification_card_layout.setSpacing(12)
+        notification_heading = QLabel("推送与自动退出")
+        notification_heading.setObjectName("sectionTitle")
+        notification_card_layout.addWidget(notification_heading)
+        notification_intro = QLabel("选择需要发送到 Lark 的事件。Webhook 会保存在本机应用设置中，输入框默认隐藏内容。")
+        notification_intro.setObjectName("subtitle")
+        notification_intro.setWordWrap(True)
+        notification_card_layout.addWidget(notification_intro)
+
+        webhook_label = QLabel("Lark 自定义机器人 Webhook")
+        webhook_label.setObjectName("fieldLabel")
+        notification_card_layout.addWidget(webhook_label)
+        webhook_row = QHBoxLayout()
+        self.lark_webhook = QLineEdit()
+        self.lark_webhook.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lark_webhook.setPlaceholderText("粘贴 Lark 自定义机器人 Webhook")
+        self.lark_webhook.setClearButtonEnabled(True)
+        self.lark_webhook.setText(str(self.settings.value("larkWebhook", "")))
+        self.lark_webhook.textChanged.connect(self.save_lark_webhook)
+        webhook_row.addWidget(self.lark_webhook, 1)
+        self.lark_status = QLabel("未配置")
+        self.lark_status.setObjectName("subtitle")
+        webhook_row.addWidget(self.lark_status)
+        notification_card_layout.addLayout(webhook_row)
+        self.update_lark_status(self.lark_webhook.text())
+
+        notification_options = QFrame()
+        notification_options.setObjectName("taskOptions")
+        notification_options_layout = QVBoxLayout(notification_options)
+        notification_options_layout.setContentsMargins(12, 10, 12, 10)
+        notification_options_layout.setSpacing(8)
+        notification_options_title = QLabel("通知事件")
+        notification_options_title.setObjectName("fieldLabel")
+        notification_options_layout.addWidget(notification_options_title)
+        self.notification_preferences = {}
+        preferences = (
+            ("equipment", "装备掉落", "notifyEquipmentDrop"),
+            ("quest", "任务完成（包含任务名称）", "notifyQuestComplete"),
+            ("fatigue", "疲劳耗尽", "notifyFatigueExhausted"),
+            ("purchase", "商城抢购交易已提交", "notifyPurchaseSuccess"),
+            ("sale", "商城出售成功", "notifySaleSuccess"),
+        )
+        options_grid = QGridLayout()
+        options_grid.setHorizontalSpacing(12)
+        options_grid.setVerticalSpacing(6)
+        for index, (event_key, label_text, setting_key) in enumerate(preferences):
+            checkbox = QCheckBox(label_text)
+            checkbox.setMinimumHeight(38)
+            checkbox.setChecked(self.settings.value(setting_key, True, type=bool))
+            checkbox.toggled.connect(
+                lambda checked, key=setting_key: self.settings.setValue(key, checked))
+            self.notification_preferences[event_key] = checkbox
+            options_grid.addWidget(checkbox, index // 2, index % 2)
+        notification_options_layout.addLayout(options_grid)
+        notification_card_layout.addWidget(notification_options)
+
+        self.logout_on_fatigue = QCheckBox("疲劳耗尽后断开并退出当前登录")
+        self.logout_on_fatigue.setChecked(self.settings.value("logoutOnFatigue", False, type=bool))
+        self.logout_on_fatigue.toggled.connect(
+            lambda checked: self.settings.setValue("logoutOnFatigue", checked))
+        self.logout_on_fatigue.setToolTip("只在收到服务端确认疲劳为 0% 时触发；下次需手动重新登录。")
+        notification_card_layout.addWidget(self.logout_on_fatigue)
+        notification_hint = QLabel("抢购提示表示交易已提交到 BSC 网络；出售成功推送会在应用获得出售成功事件后触发。")
+        notification_hint.setObjectName("subtitle")
+        notification_hint.setWordWrap(True)
+        notification_card_layout.addWidget(notification_hint)
+        notification_layout.addWidget(notification_card)
+        notification_layout.addStretch(1)
+        tabs.addTab(notification_page, "推送设置")
         right.addWidget(tabs, 1)
         scroll = QScrollArea()
         scroll.setObjectName("mainScroll")
@@ -2331,6 +2415,9 @@ class MainWindow(QMainWindow):
         self.monsters = {}
         self.last_self_state = {}
         self.last_progress_state = {}
+        self._fatigue_exhaustion_handled = False
+        self._quest_notification_state = None
+        self._known_equipment_ids = None
         self.last_peers = []
         self.peer_cache = {}
         self.peer_last_seen = {}
@@ -2497,6 +2584,9 @@ class MainWindow(QMainWindow):
                                              (f" · 公会 #{self_state['guildId']}" if self_state.get("guildId") else ""))
                     self.update_mode_control(unlock)
                 self.refresh_character_status()
+                self.handle_fatigue_state(self_state)
+                if self.manual_disconnect:
+                    return
                 if self.server_dead:
                     detected_death = not self.respawn_pending and self.respawn_attempts < 3
                     self.move_timer.stop()
@@ -2778,6 +2868,28 @@ class MainWindow(QMainWindow):
 
     def update_quests(self, quests: list) -> None:
         rows = [quest for quest in quests if isinstance(quest, dict)]
+        current_states = {}
+        for quest in rows:
+            quest_id = str(quest.get("id", quest.get("questId", "")))
+            if quest_id:
+                current_states[quest_id] = bool(quest.get("completed"))
+        previous_states = self._quest_notification_state
+        if previous_states is not None:
+            for quest in rows:
+                quest_id = str(quest.get("id", quest.get("questId", "")))
+                if (quest_id and quest.get("completed") and
+                        not previous_states.get(quest_id, False)):
+                    title = str(quest.get("titleZh") or quest.get("title") or f"任务 {quest_id}")
+                    map_id = quest.get("mapId")
+                    try:
+                        map_name = MAP_NAMES.get(int(map_id), str(map_id)) if map_id is not None else "未指定地图"
+                    except (TypeError, ValueError):
+                        map_name = str(map_id)
+                    self.send_lark_notification("任务完成", f"**{title}**\n\n完成地图：{map_name}\n任务编号：{quest_id}", "green", "quest")
+        if previous_states is None:
+            self._quest_notification_state = current_states
+        else:
+            previous_states.update(current_states)
         self.latest_quests = rows
         for quest in rows:
             if (quest.get("mapId") is not None and
@@ -2827,6 +2939,154 @@ class MainWindow(QMainWindow):
                 self.combat_status.setText("任务有限模式：没有进行中的怪物任务，自动攻击已暂停。")
         if not active and hasattr(self, "auto_quest") and self.auto_quest.isChecked():
             self.accept_next_monster_quest()
+
+    def save_lark_webhook(self, value: str) -> None:
+        webhook = value.strip()
+        if webhook:
+            self.settings.setValue("larkWebhook", webhook)
+        else:
+            self.settings.remove("larkWebhook")
+        self.settings.sync()
+        self.update_lark_status(webhook)
+
+    def update_lark_status(self, value: str) -> None:
+        configured = bool(value.strip())
+        self.lark_status.setText("已保存 · 本机" if configured else "未配置")
+        self.lark_status.setStyleSheet("color:#75D5A6;" if configured else "")
+
+    def on_shop_notification(self, event_key: str, title: str, detail: str) -> None:
+        self.send_lark_notification(title, detail, "green", event_key)
+
+    def send_lark_notification(self, title: str, detail: str, color: str = "blue",
+                               event_key: str | None = None) -> None:
+        if event_key:
+            checkbox = getattr(self, "notification_preferences", {}).get(event_key)
+            if checkbox is None or not checkbox.isChecked():
+                return
+        webhook = self.lark_webhook.text().strip() if hasattr(self, "lark_webhook") else ""
+        if not webhook:
+            return
+        try:
+            parsed = urllib.parse.urlsplit(webhook)
+        except ValueError:
+            self.bridge.notification_result.emit(title, False, "Webhook 地址格式无效，请检查 Lark 地址。")
+            return
+        if (parsed.scheme != "https" or parsed.hostname != "open.larksuite.com"
+                or not parsed.path.startswith("/open-apis/bot/v2/hook/") or parsed.query or parsed.fragment):
+            self.bridge.notification_result.emit(title, False, "Webhook 地址格式无效，请检查 Lark 地址。")
+            return
+        safe_color = color if color in {"blue", "green", "orange", "red"} else "blue"
+        character_name = self.character_facts.get("角色") if hasattr(self, "character_facts") else None
+        character_name = character_name.text() if character_name else "Tabby 角色"
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        card = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": safe_color,
+                    "title": {"tag": "plain_text", "content": f"🎮 {title}"},
+                },
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md", "content": detail}},
+                    {"tag": "hr"},
+                    {"tag": "note", "elements": [
+                        {"tag": "plain_text", "content": f"{character_name}  ·  Tabby Desktop  ·  {timestamp}"}
+                    ]},
+                ],
+            },
+        }
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(
+                    webhook, data=json.dumps(card, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if isinstance(payload, dict) and payload.get("code", 0) not in (0, None):
+                    self.bridge.notification_result.emit(title, False, "Lark 接收通知失败，请检查机器人配置。")
+                else:
+                    self.bridge.notification_result.emit(title, True, "")
+            except urllib.error.HTTPError as exc:
+                self.bridge.notification_result.emit(title, False, f"Lark 请求失败（HTTP {exc.code}）。")
+            except Exception as exc:
+                # Never include exception text: urllib errors can contain the full webhook URL.
+                self.bridge.notification_result.emit(title, False, f"Lark 通知发送失败（{type(exc).__name__}）。")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_notification_result(self, title: str, success: bool, error: str) -> None:
+        if success:
+            self.lark_status.setText(f"已发送：{title}")
+            self.lark_status.setStyleSheet("color:#75D5A6;")
+        else:
+            self.lark_status.setText(error or "发送失败")
+            self.lark_status.setStyleSheet("color:#E78178;")
+
+    def handle_fatigue_state(self, self_state: dict) -> None:
+        farming = self_state.get("farming") if isinstance(self_state, dict) else None
+        if not isinstance(farming, dict) or "staminaPercent" not in farming:
+            return
+        try:
+            stamina = float(farming["staminaPercent"])
+        except (TypeError, ValueError):
+            return
+        if stamina > 0 or self._fatigue_exhaustion_handled:
+            return
+        self._fatigue_exhaustion_handled = True
+        self.send_lark_notification(
+            "疲劳值已耗尽", "当前角色疲劳已降至 **0%**。" +
+            ("\n\n已按设置断开连接并退出当前登录。" if self.logout_on_fatigue.isChecked() else "\n\n游戏连接保持开启。"),
+            "orange", "fatigue")
+        if self.logout_on_fatigue.isChecked():
+            self.logout_for_fatigue()
+
+    def logout_for_fatigue(self) -> None:
+        self.session_token = ""
+        self.signed_session_token = ""
+        self._resolved_token = ""
+        self.token.clear()
+        self.disconnect_ws()
+        self.status.setText("疲劳耗尽 · 已退出登录")
+        self.travel_status.setText("疲劳已耗尽，已断开游戏并退出当前登录；请手动重新登录。")
+
+    @staticmethod
+    def equipment_identity(item: dict) -> str:
+        for key in ("playerItemId", "playerEquipmentId", "inventoryItemId", "id"):
+            value = item.get(key)
+            if value is not None and str(value):
+                return f"{key}:{value}"
+        return hashlib.sha256(json.dumps(item, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+    def notify_new_equipment(self, equipment: dict) -> None:
+        items = equipment.get("items", [])
+        if not isinstance(items, list):
+            return
+        current = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("itemKind", item.get("kind", ""))).upper()
+            slot = str(item.get("slotType", item.get("equipmentType", ""))).upper()
+            if "EQUIP" not in kind and slot not in SLOT_NAMES_ZH:
+                continue
+            current[self.equipment_identity(item)] = item
+        if self._known_equipment_ids is not None:
+            for identity, item in current.items():
+                if identity in self._known_equipment_ids:
+                    continue
+                name = str(item.get("itemNameZh") or item.get("itemName") or item.get("name") or item.get("itemCode") or "新装备")
+                slot = str(item.get("slotType") or item.get("equipmentType") or "装备")
+                quality = str(item.get("qualityNameZh") or item.get("quality") or item.get("equipmentLevel") or "")
+                attributes = " · ".join(equipment_attribute_lines(item))
+                detail = f"获得新装备：**{name}**\n\n部位：{SLOT_NAMES_ZH.get(slot.upper(), slot)}"
+                if quality:
+                    detail += f"\n品质：{quality}"
+                if attributes:
+                    detail += f"\n属性：{attributes}"
+                self.send_lark_notification("装备掉落", detail, "green", "equipment")
+        self._known_equipment_ids = set(current)
 
     def has_active_monster_quest(self) -> bool:
         for quest in self.latest_quests:
@@ -3296,6 +3556,7 @@ class MainWindow(QMainWindow):
         if isinstance(player, dict) and player:
             self.api_profile = player.get("player", player)
         if isinstance(equipment, dict) and equipment:
+            self.notify_new_equipment(equipment)
             self.api_equipment = equipment
         progression_data = progression.get("progression", progression) if isinstance(progression, dict) else {}
         if isinstance(progression_data, dict):
@@ -3313,6 +3574,7 @@ class MainWindow(QMainWindow):
                 self.append_log(f"击败结算未完成 {data['claimEncounterId']}：{data['claimError']}")
             else:
                 self.append_log(f"击败结算已同步：{data['claimEncounterId']}；任务进度已刷新。")
+                self.refresh_profile_data(force=True)
 
     @staticmethod
     def find_unread_count(payload: object) -> int | None:

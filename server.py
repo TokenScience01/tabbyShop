@@ -240,6 +240,7 @@ class ShopMonitor:
         self.buy_total = float(persisted.get("buyTotal", 0))
         self.attempted_products = set(persisted.get("attemptedProducts", []))
         self.buy_lock = threading.Lock()
+        self.event_callback = None
         threading.Thread(target=self._run, name="shop-monitor", daemon=True).start()
         if self.enabled:
             self.wake.set()
@@ -415,6 +416,11 @@ class ShopMonitor:
                         self.auto_buy_enabled = False
                     self._persist()
                     self.events = self.events[:30]
+                self.emit_event(
+                    "purchase", "秒购交易已提交",
+                    f"商品：**{product.get('itemName') or product.get('itemCode') or product_id}**\n\n"
+                    f"价格：{result['amount']}\n交易哈希：`{result['txHash']}`",
+                )
             except Exception as exc:
                 with self.lock:
                     self.auto_buy_enabled = False
@@ -424,6 +430,16 @@ class ShopMonitor:
                         "ok": False, "label": f"自动购买已暂停：{self.error}", "matches": 0})
                     self._persist()
                     self.events = self.events[:30]
+
+    def emit_event(self, event_key, title, detail):
+        """Forward shop events without letting UI notification errors affect trading."""
+        callback = self.event_callback
+        if callback is None:
+            return
+        try:
+            callback(event_key, title, detail)
+        except Exception:
+            pass
 
     def _run(self):
         while True:

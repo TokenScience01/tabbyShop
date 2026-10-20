@@ -17,7 +17,7 @@ OWNER = "TokenScience01"
 REPOSITORY = "tabbyShop"
 RELEASES_API = f"https://api.github.com/repos/{OWNER}/{REPOSITORY}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{OWNER}/{REPOSITORY}/releases/latest"
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.10"
 ASSET_NAME = "TabbyDesktop-windows-x64.zip"
 
 
@@ -106,46 +106,86 @@ def prepare_windows_update(archive: Path, install_dir: Path) -> Path:
     if os.name != "nt":
         raise RuntimeError("自动替换目前只支持 Windows 桌面版")
     install_dir = install_dir.resolve()
-    stage = Path(tempfile.mkdtemp(prefix="tabby-update-"))
-    with zipfile.ZipFile(archive) as bundle:
-        names = bundle.namelist()
-        if not names or any(Path(name).is_absolute() or ".." in Path(name).parts for name in names):
-            raise ValueError("更新包包含无效路径")
-        expected = "TabbyDesktop/TabbyDesktop.exe"
-        if expected not in names:
-            raise ValueError("更新包内找不到 TabbyDesktop.exe")
-        bundle.extractall(stage)
-    staged_app = stage / "TabbyDesktop"
-    if not (staged_app / "TabbyDesktop.exe").is_file():
-        raise ValueError("更新包结构不完整")
+    # Stage beside the installation so the directory swap stays on the same
+    # volume. Windows' move command cannot reliably rename across drives.
+    stage = Path(tempfile.mkdtemp(prefix=".tabby-update-", dir=install_dir.parent))
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            names = bundle.namelist()
+            if not names or any(Path(name).is_absolute() or ".." in Path(name).parts for name in names):
+                raise ValueError("更新包包含无效路径")
+            expected = "TabbyDesktop/TabbyDesktop.exe"
+            if expected not in names:
+                raise ValueError("更新包内找不到 TabbyDesktop.exe")
+            bundle.extractall(stage)
+        staged_app = stage / "TabbyDesktop"
+        if not (staged_app / "TabbyDesktop.exe").is_file():
+            raise ValueError("更新包结构不完整")
 
-    script = stage / "install-update.bat"
-    backup = install_dir.with_name(install_dir.name + ".previous")
-    script.write_text(
-        "@echo off\r\nsetlocal\r\n"
+        script = stage / "install-update.bat"
+        backup = install_dir.with_name(install_dir.name + ".previous")
+        script.write_text(
+            _windows_update_script(stage, staged_app, install_dir, backup, os.getpid()),
+            encoding="utf-8",
+        )
+        return script
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def _windows_update_script(stage: Path, staged_app: Path, install_dir: Path,
+                           backup: Path, app_pid: int) -> str:
+    """Build a logged, rollback-capable same-volume Windows directory swap."""
+    exe = install_dir / "TabbyDesktop.exe"
+    stage = Path(stage)
+    return (
+        "@echo off\r\nsetlocal EnableExtensions\r\n"
         "set \"TARGET=" + str(install_dir) + "\"\r\n"
         "set \"STAGED=" + str(staged_app) + "\"\r\n"
+        "set \"STAGE=" + str(stage) + "\"\r\n"
         "set \"BACKUP=" + str(backup) + "\"\r\n"
-        "set \"EXE=" + str(install_dir / "TabbyDesktop.exe") + "\"\r\n"
-        "set \"APP_PID=" + str(os.getpid()) + "\"\r\n"
-        ":wait\r\ntasklist /FI \"PID eq %APP_PID%\" | find \"%APP_PID%\" >nul\r\n"
+        "set \"EXE=" + str(exe) + "\"\r\n"
+        "set \"APP_PID=" + str(app_pid) + "\"\r\n"
+        "set \"LOG=%LOCALAPPDATA%\\TabbyDesktop\\update.log\"\r\n"
+        "if not exist \"%LOCALAPPDATA%\\TabbyDesktop\" mkdir \"%LOCALAPPDATA%\\TabbyDesktop\" >nul 2>&1\r\n"
+        ">\"%LOG%\" echo Tabby update started.\r\n"
+        ">>\"%LOG%\" echo Install directory: %TARGET%\r\n"
+        ":wait\r\n"
+        "tasklist /FI \"PID eq %APP_PID%\" | find \"%APP_PID%\" >nul\r\n"
         "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
-        "if exist \"%BACKUP%\" rmdir /s /q \"%BACKUP%\"\r\n"
-        "if exist \"%TARGET%\" move \"%TARGET%\" \"%BACKUP%\" >nul\r\n"
-        "move \"%STAGED%\" \"%TARGET%\" >nul\r\n"
-        "if errorlevel 1 (if exist \"%BACKUP%\" move \"%BACKUP%\" \"%TARGET%\" >nul & exit /b 1)\r\n"
+        "if exist \"%BACKUP%\" rmdir /s /q \"%BACKUP%\" >>\"%LOG%\" 2>&1\r\n"
+        "if exist \"%BACKUP%\" goto failed\r\n"
+        "if not exist \"%TARGET%\" goto install\r\n"
+        "move \"%TARGET%\" \"%BACKUP%\" >>\"%LOG%\" 2>&1\r\n"
+        "if errorlevel 1 goto failed\r\n"
+        ":install\r\n"
+        "move \"%STAGED%\" \"%TARGET%\" >>\"%LOG%\" 2>&1\r\n"
+        "if errorlevel 1 goto rollback\r\n"
+        "if not exist \"%EXE%\" goto rollback\r\n"
         "start \"\" \"%EXE%\"\r\n"
-        "rmdir /s /q \"" + str(stage) + "\"\r\n",
-        encoding="utf-8",
+        "if errorlevel 1 goto rollback\r\n"
+        ">>\"%LOG%\" echo Tabby update completed.\r\n"
+        "rmdir /s /q \"%STAGE%\" >>\"%LOG%\" 2>&1\r\n"
+        "exit /b 0\r\n"
+        ":rollback\r\n"
+        ">>\"%LOG%\" echo Update failed; restoring previous application.\r\n"
+        "if exist \"%TARGET%\" rmdir /s /q \"%TARGET%\" >>\"%LOG%\" 2>&1\r\n"
+        "if exist \"%BACKUP%\" move \"%BACKUP%\" \"%TARGET%\" >>\"%LOG%\" 2>&1\r\n"
+        ":failed\r\n"
+        ">>\"%LOG%\" echo Update did not complete.\r\n"
+        "start \"\" powershell.exe -NoProfile -Command \"Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('Tabby update failed. See update.log in Local AppData.','Tabby updater')\"\r\n"
+        "if exist \"%EXE%\" start \"\" \"%EXE%\"\r\n"
+        "exit /b 1\r\n"
     )
-    return script
 
 
 def launch_update_script(script: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("自动替换目前只支持 Windows 桌面版")
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=flags, close_fds=True)
+    command = f'"{os.environ.get("COMSPEC", "cmd.exe")}" /d /s /c ""{script.resolve()}""'
+    subprocess.Popen(command, creationflags=flags, close_fds=True)
 
 
 def is_frozen_windows() -> bool:

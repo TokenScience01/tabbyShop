@@ -33,7 +33,7 @@ python desktop.py
 
 ## Windows 打包
 
-运行 `build-desktop-windows.bat`。产物为 `dist/TabbyDesktop/`，运行其中的 TabbyDesktop.exe；发布时需带上整个目录（含 Qt WebEngine 运行资源）。原 `build-windows.bat`、CI 和 server.py 的浏览器版入口仍保留。
+运行 `build-desktop-windows.bat`。产物为 `dist/TabbyDesktop/`，运行其中的 TabbyDesktop.exe；发布时需带上整个目录（含 Qt WebEngine 运行资源）。创建 GitHub Release 前，需把 `github_updater.py` 的 `APP_VERSION` 更新为对应标签版本。原 `build-windows.bat`、CI 和 server.py 的浏览器版入口仍保留。
 
 ## 验证
 
