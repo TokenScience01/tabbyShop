@@ -109,6 +109,11 @@ class DesktopWindow(QMainWindow):
         self._game_session_widgets = {}
         self._game_address_by_bridge = {}
         self._session_tokens = {}
+        self._batch_login_queue = []
+        self._batch_login_inflight = ''
+        self._batch_login_attempted = 0
+        self._batch_login_failed = 0
+        self._batch_login_return_tab = 0
         self._loaded = False
         self._shop_started = False
         self.httpd = None
@@ -133,6 +138,9 @@ class DesktopWindow(QMainWindow):
             QFrame#walletAccountRow { background: #1B2020; border: 1px solid #343B39; border-radius: 10px; }
             QFrame#walletAccountRow:hover { border-color: #687B65; background: #202626; }
             QLabel#walletAddress { color: #E8ECEB; font-family: Consolas; font-size: 12px; }
+            QPushButton#walletCopyAddress { min-height:26px; padding:3px 9px; color:#B7DFAE;
+                background:#202725; border:1px solid #46534C; border-radius:6px; font-size:11px; }
+            QPushButton#walletCopyAddress:hover { background:#29332E; border-color:#78936B; }
             QLabel#walletAccountState { color: #8E9994; font-size: 10px; }
             QLabel#walletAccountDetails { color: #C5CECA; font-size: 11px; }
             QLabel#walletStatusDot { border-radius: 5px; }
@@ -143,6 +151,12 @@ class DesktopWindow(QMainWindow):
             QScrollArea#plannerAccountsScroll, QScrollArea#plannerAccountsScroll > QWidget#qt_scrollarea_viewport {
                 background:transparent; border:0;
             }
+            QFrame#multiAccountPlanner QCheckBox { color:#C5CECA; font-size:12px; spacing:7px; padding:2px 4px; }
+            QFrame#multiAccountPlanner QCheckBox:hover { color:#E8ECEB; }
+            QFrame#multiAccountPlanner QCheckBox::indicator { width:15px; height:15px; border:1px solid #59635F;
+                                                                border-radius:4px; background:#151919; }
+            QFrame#multiAccountPlanner QCheckBox::indicator:hover { border-color:#78936B; }
+            QFrame#multiAccountPlanner QCheckBox::indicator:checked { background:#287A50; border-color:#3D9A68; }
             QCheckBox#plannerAccountCheck { color:#C5CECA; font-size:12px; spacing:7px; padding:2px 4px; }
             QCheckBox#plannerAccountCheck:hover { color:#E8ECEB; }
             QCheckBox#plannerAccountCheck::indicator { width:15px; height:15px; border:1px solid #59635F;
@@ -402,6 +416,7 @@ class DesktopWindow(QMainWindow):
         heading.addWidget(title)
         heading.addStretch(1)
         self.planner_select_all = QCheckBox('全选账号')
+        self.planner_select_all.setObjectName('plannerSelectAll')
         self.planner_select_all.toggled.connect(self.set_all_planner_accounts)
         heading.addWidget(self.planner_select_all)
         layout.addLayout(heading)
@@ -409,6 +424,7 @@ class DesktopWindow(QMainWindow):
         self.planner_account_checks = {}
         self.planner_accounts_content = QWidget()
         self.planner_accounts_content.setObjectName('plannerAccountsContent')
+        self.planner_accounts_content.setStyleSheet('background:transparent;')
         self.planner_accounts_layout = QGridLayout(self.planner_accounts_content)
         self.planner_accounts_layout.setContentsMargins(2, 0, 2, 0)
         self.planner_accounts_layout.setHorizontalSpacing(12)
@@ -420,9 +436,12 @@ class DesktopWindow(QMainWindow):
         account_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         account_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         account_scroll.setMinimumHeight(32)
-        account_scroll.setMaximumHeight(40)
         self.planner_accounts_scroll = account_scroll
         account_scroll.setWidget(self.planner_accounts_content)
+        account_scroll.viewport().setAutoFillBackground(False)
+        account_scroll.viewport().setStyleSheet('background:transparent; border:0;')
+        account_scroll.setStyleSheet('QScrollArea { background:transparent; border:0; }')
+        self.planner_accounts_content.setAutoFillBackground(False)
         layout.addWidget(account_scroll)
 
         controls = QHBoxLayout()
@@ -462,13 +481,21 @@ class DesktopWindow(QMainWindow):
         self.planner_start = QPushButton('启动所选账号')
         self.planner_start.setObjectName('primaryButton')
         self.planner_start.clicked.connect(self.start_multi_account_plan)
+        self.planner_batch_connect = QPushButton('批量上线所选')
+        self.planner_batch_connect.setObjectName('secondaryButton')
+        self.planner_batch_connect.clicked.connect(self.batch_connect_accounts)
         self.planner_pause = QPushButton('暂停方案')
         self.planner_pause.setObjectName('secondaryButton')
         self.planner_pause.clicked.connect(self.pause_multi_account_plan)
         self.planner_stop = QPushButton('停止方案')
         self.planner_stop.setObjectName('secondaryButton')
         self.planner_stop.clicked.connect(self.stop_multi_account_plan)
+        self.planner_batch_disconnect = QPushButton('批量下线所选')
+        self.planner_batch_disconnect.setObjectName('secondaryButton')
+        self.planner_batch_disconnect.clicked.connect(self.batch_disconnect_accounts)
         actions.addWidget(self.planner_start)
+        actions.addWidget(self.planner_batch_connect)
+        actions.addWidget(self.planner_batch_disconnect)
         actions.addWidget(self.planner_pause)
         actions.addWidget(self.planner_stop)
         actions.addStretch(1)
@@ -504,6 +531,10 @@ class DesktopWindow(QMainWindow):
             empty = QLabel('请先导入钱包')
             empty.setObjectName('plannerHint')
             self.planner_accounts_layout.addWidget(empty, 0, 0)
+        rows = max(1, (len(addresses) + columns - 1) // columns)
+        row_height = 28
+        scroll_height = rows * row_height + 8
+        self.planner_accounts_scroll.setFixedHeight(scroll_height)
         self.planner_select_all.blockSignals(True)
         self.planner_select_all.setChecked(bool(addresses) and all(
             box.isChecked() for box in self.planner_account_checks.values()))
@@ -520,6 +551,97 @@ class DesktopWindow(QMainWindow):
             box.blockSignals(True)
             box.setChecked(checked)
             box.blockSignals(False)
+
+    def batch_connect_accounts(self):
+        """Connect selected saved wallets one at a time using the shared unlock."""
+        if self._batch_login_inflight or self._batch_login_queue:
+            self.planner_status.setText('批量上线正在进行中，请等待当前账号完成签名登录。')
+            return
+        if shop.MONITOR.buy_lock.locked():
+            self.planner_status.setText('商城购买正在提交，完成后再批量上线。')
+            return
+        selected = [address for address, box in self.planner_account_checks.items()
+                    if box.isChecked()]
+        if not selected:
+            self.planner_status.setText('请先选择要批量上线的账号。')
+            return
+        queue = []
+        for address in selected:
+            session = self._game_sessions.get(address.lower())
+            state = session.status.text() if session else ''
+            if state not in ('已连接', '连接中', '连接中…'):
+                queue.append(address)
+        if not queue:
+            self.planner_status.setText('所选账号都已在线或正在连接。')
+            return
+
+        phrase = self._master_passphrase or self.game._vault_passphrase
+        if not phrase:
+            phrase = self.ask_shared_passphrase(confirm=False)
+        if not phrase:
+            self.planner_status.setText('已取消批量上线；需要先解锁钱包保险库。')
+            return
+        try:
+            # Validate the shared password before starting any login attempts.
+            self.game.credential_vault.load_wallet(phrase, queue[0])
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, '无法解锁钱包', f'批量上线已取消：{exc}')
+            return
+
+        self.cache_shared_passphrase(phrase)
+        self._batch_login_queue = queue
+        self._batch_login_attempted = 0
+        self._batch_login_failed = 0
+        self._batch_login_return_tab = self.tabs.currentIndex()
+        self.planner_batch_connect.setEnabled(False)
+        self.planner_status.setText(f'正在逐个上线 {len(queue)} 个账号；每个签名完成后继续下一个。')
+        self._continue_batch_login()
+
+    def _continue_batch_login(self):
+        if not self._batch_login_queue:
+            if not self._batch_login_attempted:
+                self._batch_login_inflight = ''
+                self.planner_batch_connect.setEnabled(True)
+                self.planner_status.setText('所选账号都已上线或正在连接。')
+                return
+            message = (f'批量上线已发起 {self._batch_login_attempted} 个账号；'
+                       f'签名失败 {self._batch_login_failed} 个，请看账号状态点确认在线情况。')
+            self.planner_status.setText(message)
+            self.refresh_account_rows()
+            self._batch_login_inflight = ''
+            self.planner_batch_connect.setEnabled(True)
+            self.tabs.setCurrentIndex(self._batch_login_return_tab)
+            return
+        address = self._batch_login_queue.pop(0)
+        session = self._game_sessions.get(address.lower())
+        state = session.status.text() if session else ''
+        if state in ('已连接', '连接中', '连接中…'):
+            QTimer.singleShot(0, self._continue_batch_login)
+            return
+        self._batch_login_inflight = address.lower()
+        self.planner_status.setText(
+            f'批量上线中：{self._batch_login_attempted + 1} / '
+            f'{self._batch_login_attempted + len(self._batch_login_queue) + 1} · {address[-3:]}')
+        self.connect_account(address)
+        QTimer.singleShot(60000, lambda expected=address.lower(): self._batch_login_timeout(expected))
+
+    def _batch_login_timeout(self, expected_address):
+        if self._batch_login_inflight != expected_address:
+            return
+        self._batch_login_inflight = ''
+        self._batch_login_attempted += 1
+        self._batch_login_failed += 1
+        self.planner_status.setText(f'账号尾号 {expected_address[-3:]} 登录等待超时，继续下一个账号。')
+        QTimer.singleShot(0, self._continue_batch_login)
+
+    def _finish_batch_login_result(self, address, result):
+        if not self._batch_login_inflight or str(address).lower() != self._batch_login_inflight:
+            return
+        self._batch_login_attempted += 1
+        if not (isinstance(result, dict) and result.get('ok') and result.get('token')):
+            self._batch_login_failed += 1
+        self._batch_login_inflight = ''
+        QTimer.singleShot(250, self._continue_batch_login)
 
     def update_planner_select_all(self, *_args):
         boxes = list(self.planner_account_checks.values())
@@ -590,6 +712,51 @@ class DesktopWindow(QMainWindow):
             game.update_map_buttons()
         self.planner_status.setText(f'已停止 {len(games)} 个所选账号的自动任务与战斗。')
 
+    def batch_disconnect_accounts(self):
+        """Stop automation and close the game socket for every selected online account."""
+        selected = [address for address, box in self.planner_account_checks.items()
+                    if box.isChecked()]
+        if not selected:
+            self.planner_status.setText('请先选择要批量下线的账号。')
+            return
+
+        selected_ids = {address.lower() for address in selected}
+        disconnected = 0
+        already_offline = 0
+        # Cancel any not-yet-started batch logins so the offline action remains final.
+        if self._batch_login_queue or self._batch_login_inflight:
+            self._batch_login_queue = [address for address in self._batch_login_queue
+                                       if address.lower() not in selected_ids]
+            if self._batch_login_inflight in selected_ids:
+                self._batch_login_inflight = ''
+            self.planner_batch_connect.setEnabled(not self._batch_login_queue)
+
+        for address in selected:
+            game = self._game_sessions.get(address.lower())
+            if game is None:
+                already_offline += 1
+                continue
+            game.auto_attack.setChecked(False)
+            game.auto_quest.setChecked(False)
+            game.quest_map_auto.setChecked(False)
+            game.move_timer.stop()
+            game.pending_destination = None
+            game.pending_portal = None
+            game.route_points = []
+            game.update_map_buttons()
+            if game.ws is not None or game.status.text() in ('已连接', '连接中', '连接中…'):
+                if address.lower() == self.active_address.lower():
+                    shop.MONITOR.stop()
+                game.disconnect_ws()
+                disconnected += 1
+            else:
+                already_offline += 1
+
+        self.refresh_account_rows()
+        self.planner_status.setText(
+            f'已批量下线 {disconnected} 个账号' +
+            (f'；{already_offline} 个本来就离线' if already_offline else '') + '。')
+
     def load_shop_profiles(self):
         try:
             payload = json.loads(self._profile_path.read_text(encoding='utf-8'))
@@ -647,10 +814,18 @@ class DesktopWindow(QMainWindow):
             dot = QLabel()
             dot.setObjectName('walletStatusDot')
             dot.setFixedSize(10, 10)
-            address_label = QLabel(address)
+            address_label = QLabel(self.compact_wallet_address(address))
             address_label.setObjectName('walletAddress')
+            address_label.setToolTip(address)
             address_row.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
             address_row.addWidget(address_label, 1)
+            copy_address = QPushButton('复制地址')
+            copy_address.setObjectName('walletCopyAddress')
+            copy_address.setToolTip('复制完整钱包地址')
+            copy_address.clicked.connect(
+                lambda _checked=False, wallet=address, button=copy_address:
+                self.copy_wallet_address(wallet, button))
+            address_row.addWidget(copy_address, 0, Qt.AlignmentFlag.AlignVCenter)
             identity.addLayout(address_row)
             is_active = address.lower() == self.active_address.lower()
             session = self._game_sessions.get(address.lower())
@@ -703,6 +878,26 @@ class DesktopWindow(QMainWindow):
         self.account_rows.addStretch(1)
 
     @staticmethod
+    def compact_wallet_address(address):
+        address = str(address or '')
+        if len(address) <= 10:
+            return address
+        return f'{address[:3]}…{address[-4:]}'
+
+    @staticmethod
+    def copy_wallet_address(address, button=None):
+        QApplication.clipboard().setText(str(address))
+        if button is not None:
+            button.setText('已复制')
+            def restore_label(target=button):
+                try:
+                    target.setText('复制地址')
+                except RuntimeError:
+                    # The account list may have been refreshed meanwhile.
+                    pass
+            QTimer.singleShot(1200, restore_label)
+
+    @staticmethod
     def account_summary(game):
         if game is None:
             return ''
@@ -749,11 +944,36 @@ class DesktopWindow(QMainWindow):
         farming = self_state.get('farming', {})
         stamina = farming.get('staminaPercent') if isinstance(farming, dict) else None
         if stamina is not None:
-            parts.append(f'疲劳 {stamina}%')
+            parts.append(f'疲劳 {DesktopWindow.format_summary_decimal(stamina)}%')
+        experience = progress.get('experience', profile.get('experience'))
+        experience_needed = progress.get('experienceNeeded', profile.get('experienceNeeded'))
+        if experience is not None:
+            shown_experience = DesktopWindow.format_summary_integer(experience)
+            if experience_needed is not None:
+                shown_experience += '/' + DesktopWindow.format_summary_integer(experience_needed)
+            parts.append(f'经验 {shown_experience}')
         gold = profile.get('gold', self_state.get('gold'))
         if gold is not None:
-            parts.append(f'金币 {gold}')
+            parts.append(f'金币 {DesktopWindow.format_summary_decimal(gold)}')
+        balance = getattr(game, 'tabby_balance_display', '')
+        if balance:
+            parts.append(f'TABBY {balance}')
         return ' · '.join(parts)
+
+    @staticmethod
+    def format_summary_decimal(value):
+        try:
+            return f'{float(value):,.2f}'
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def format_summary_integer(value):
+        try:
+            number = float(value)
+            return f'{int(number):,}' if number.is_integer() else f'{number:,.2f}'
+        except (TypeError, ValueError):
+            return str(value)
 
     def ask_shared_passphrase(self, confirm):
         prompt = '设置所有钱包共用的主密码（至少 6 位）：' if confirm else '输入现有钱包保险库的主密码：'
@@ -917,6 +1137,7 @@ class DesktopWindow(QMainWindow):
             QMessageBox.warning(self, '账号控制台错误', '无法打开这个账号的游戏控制台。')
             return
         self.game = game
+        game._batch_login_silent = self._batch_login_inflight == normalized
         self.game_stack.setCurrentWidget(widget)
         if self.game.character_creation_required:
             QTimer.singleShot(0, self.game.maybe_prompt_character_creation)
@@ -1069,7 +1290,14 @@ class DesktopWindow(QMainWindow):
             answer = dialog.exec()
             if answer == QMessageBox.StandardButton.Yes:
                 launch_update_script(script)
+                # close() performs the normal websocket, monitor and HTTP
+                # cleanup. Explicitly quit the Qt event loop as well so a
+                # modeless child window/WebEngine view cannot keep the old
+                # process alive while the detached installer waits on it.
                 self.close()
+                app = QApplication.instance()
+                if app is not None:
+                    app.quit()
         except PermissionError:
             self.on_update_failed(
                 '无法写入当前程序目录。请将 TabbyDesktop 文件夹移动到当前 Windows 用户可写入的位置后重试，'
@@ -1157,11 +1385,11 @@ class DesktopWindow(QMainWindow):
         self.sync_shop_token()
 
     def on_signed_login(self, result):
+        bridge = self.sender()
+        bridge_key = id(bridge) if bridge is not None else id(self.game.bridge)
+        address = self._game_address_by_bridge.get(bridge_key, self._pending_address or self.active_address)
+        game = next((item for item in self._game_sessions.values() if id(item.bridge) == bridge_key), self.game)
         if isinstance(result, dict) and result.get('ok') and result.get('token'):
-            bridge = self.sender()
-            bridge_key = id(bridge) if bridge is not None else id(self.game.bridge)
-            address = self._game_address_by_bridge.get(bridge_key, self._pending_address or self.active_address)
-            game = next((item for item in self._game_sessions.values() if id(item.bridge) == bridge_key), self.game)
             wallet_key = str(address or '').lower()
             token_value = str(result['token'])
             if wallet_key:
@@ -1183,6 +1411,8 @@ class DesktopWindow(QMainWindow):
                 self.account_keyring_status.setText('保存状态：加密分片保存/校验失败；请重试')
             elif not self.game.remember_private_key.isChecked():
                 self.account_keyring_status.setText('保存状态：本次未保存私钥')
+        self._finish_batch_login_result(address, result)
+        game._batch_login_silent = False
 
     def update_shell_status(self, connection_state=None):
         state = connection_state or self.game.status.text()

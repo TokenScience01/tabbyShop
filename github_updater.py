@@ -17,7 +17,7 @@ OWNER = "TokenScience01"
 REPOSITORY = "tabbyShop"
 RELEASES_API = f"https://api.github.com/repos/{OWNER}/{REPOSITORY}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{OWNER}/{REPOSITORY}/releases/latest"
-APP_VERSION = "1.2.14"
+APP_VERSION = "1.2.15"
 ASSET_NAME = "TabbyDesktop-windows-x64.zip"
 
 
@@ -154,9 +154,9 @@ def _windows_update_script(stage: Path, staged_app: Path, install_dir: Path,
         ">>\"%LOG%\" echo Waiting for application process %APP_PID%.\r\n"
         "set /a WAITED=0\r\n"
         ":wait\r\n"
-        "tasklist /FI \"PID eq %APP_PID%\" | find \"%APP_PID%\" >nul\r\n"
+        "tasklist /FI \"PID eq %APP_PID%\" /NH | findstr /R /C:\"[ ]%APP_PID%[ ]\" >nul\r\n"
         "if errorlevel 1 goto stopped\r\n"
-        "if %WAITED% GEQ 120 goto failed\r\n"
+        "if %WAITED% GEQ 300 goto failed\r\n"
         "timeout /t 1 /nobreak >nul\r\n"
         "set /a WAITED+=1\r\n"
         "goto wait\r\n"
@@ -171,8 +171,12 @@ def _windows_update_script(stage: Path, staged_app: Path, install_dir: Path,
         "move \"%STAGED%\" \"%TARGET%\" >>\"%LOG%\" 2>&1\r\n"
         "if errorlevel 1 goto rollback\r\n"
         "if not exist \"%EXE%\" goto rollback\r\n"
+        ">>\"%LOG%\" echo New application files are in place.\r\n"
         "start \"\" \"%EXE%\"\r\n"
+        "timeout /t 3 /nobreak >nul\r\n"
+        "tasklist /FI \"IMAGENAME eq TabbyDesktop.exe\" /NH | findstr /I /C:\"TabbyDesktop.exe\" >nul\r\n"
         "if errorlevel 1 goto rollback\r\n"
+        ">>\"%LOG%\" echo Updated application launched successfully.\r\n"
         ">>\"%LOG%\" echo Tabby update completed.\r\n"
         "rmdir /s /q \"%STAGE%\" >>\"%LOG%\" 2>&1\r\n"
         "exit /b 0\r\n"
@@ -192,9 +196,14 @@ def launch_update_script(script: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("自动替换目前只支持 Windows 桌面版")
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c",
-               f'call "{script.resolve()}"']
-    subprocess.Popen(command, creationflags=flags, close_fds=True)
+    script_path = str(script.resolve())
+    # cmd.exe's /s quote-stripping rules make a list containing `call "..."`
+    # surprisingly fragile on paths with spaces. Use the canonical /c form.
+    command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c",
+               f'"{script_path}"']
+    subprocess.Popen(command, creationflags=flags, close_fds=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
 
 
 def is_frozen_windows() -> bool:

@@ -288,6 +288,14 @@ QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀"
 QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#69b3ff", "L3": "#c994ff", "L4": "#ffcf72",
                   "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#69b3ff",
                   "RARE": "#69b3ff", "EPIC": "#c994ff", "LEGENDARY": "#ffcf72"}
+QUALITY_LARK_TEMPLATES = {"L1": "green", "L2": "blue", "L3": "orange", "L4": "red"}
+QUALITY_CODE_ALIASES = {
+    "COMMON": "L1", "NORMAL": "L1", "L1": "L1",
+    "UNCOMMON": "L2", "RARE": "L2", "L2": "L2",
+    "EPIC": "L3", "L3": "L3",
+    "LEGENDARY": "L4", "L4": "L4",
+    "普通": "L1", "优秀": "L2", "稀有": "L2", "史诗": "L3", "传说": "L4",
+}
 NEARBY_PLAYER_TTL_SECONDS = 8.0
 
 
@@ -499,6 +507,7 @@ class MainWindow(QMainWindow):
         self._resolved_token = ""
         self.credential_vault = CredentialVault()
         self._vault_passphrase: str | None = None
+        self._batch_login_silent = False
         self.manual_disconnect = False
         self._auto_reconnect_login = False
         self._reconnect_attempt = 0
@@ -506,9 +515,12 @@ class MainWindow(QMainWindow):
         self.auth_rejected = False
         self._auth_retry_attempted = False
         self.settings = QSettings("Tabby", "TabbyDesktop")
+        self.tabby_balance_display = ""
         self._fatigue_exhaustion_handled = False
         self._quest_notification_state = None
         self._known_equipment_ids = None
+        self._auto_equip_attempted_ids = set()
+        self._auto_equip_pending_id = None
         self.reset_world_state()
         self.keepalive = QTimer(self)
         self.keepalive.setInterval(2000)
@@ -1289,6 +1301,12 @@ class MainWindow(QMainWindow):
         gear_title.setObjectName("fieldLabel")
         gear_header = QHBoxLayout()
         gear_header.addWidget(gear_title)
+        self.auto_equip_better = QCheckBox("自动装备更优装备")
+        self.auto_equip_better.setChecked(self.settings.value("autoEquipBetter", True, type=bool))
+        self.auto_equip_better.toggled.connect(
+            lambda checked: self.settings.setValue("autoEquipBetter", checked))
+        self.auto_equip_better.setToolTip("背包中出现属性全面优于当前装备的同部位装备时，自动发送穿戴请求。")
+        gear_header.addWidget(self.auto_equip_better)
         gear_header.addStretch()
         self.backpack_button = QPushButton("背包")
         self.backpack_button.setObjectName("quietButton")
@@ -2208,7 +2226,6 @@ class MainWindow(QMainWindow):
         else:
             self._vault_passphrase = None
         self.private_key.clear()
-        automatic_reauth = self._auto_reconnect_login and remember_private_key
         api_path = parsed.path.rstrip("/")
         if api_path.endswith("/realtime"):
             api_path = api_path[:-len("/realtime")]
@@ -2321,8 +2338,11 @@ class MainWindow(QMainWindow):
                 if not challenge_id or not isinstance(message, str) or not message:
                     raise RuntimeError("签名挑战缺少 challengeId 或 message")
                 approval = threading.Event()
+                # This is a one-time server login challenge for the configured
+                # game endpoint. The user already chose local-key sign-in, so
+                # don't interrupt every login with a modal confirmation.
                 approval_data = {"message": message, "approved": False, "event": approval,
-                                 "automatic": automatic_reauth}
+                                 "automatic": True}
                 self.bridge.sign_challenge.emit(approval_data)
                 if not approval.wait(timeout=180) or not approval_data["approved"]:
                     raise RuntimeError("已取消签名登录")
@@ -2397,7 +2417,8 @@ class MainWindow(QMainWindow):
             if was_auto_reconnect:
                 self.schedule_auto_reconnect()
                 return
-            QMessageBox.warning(self, "签名登录失败", str(error))
+            if not self._batch_login_silent:
+                QMessageBox.warning(self, "签名登录失败", str(error))
             return
         self.session_token = str(result["token"])
         self.signed_session_token = self.session_token
@@ -3141,9 +3162,13 @@ class MainWindow(QMainWindow):
                 or not parsed.path.startswith("/open-apis/bot/v2/hook/") or parsed.query or parsed.fragment):
             self.bridge.notification_result.emit(title, False, "Webhook 地址格式无效，请检查 Lark 地址。")
             return
-        safe_color = color if color in {"blue", "green", "orange", "red"} else "blue"
+        safe_color = color if color in {"blue", "green", "orange", "red", "purple", "yellow", "grey"} else "blue"
         character_name = self.character_facts.get("角色") if hasattr(self, "character_facts") else None
         character_name = character_name.text() if character_name else "Tabby 角色"
+        if not character_name or character_name == "—":
+            profile = getattr(self, "api_profile", {})
+            character_name = (profile.get("playerName") or profile.get("name")
+                             if isinstance(profile, dict) else None) or "Tabby 角色"
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         card = {
             "msg_type": "interactive",
@@ -3151,13 +3176,13 @@ class MainWindow(QMainWindow):
                 "config": {"wide_screen_mode": True},
                 "header": {
                     "template": safe_color,
-                    "title": {"tag": "plain_text", "content": f"🎮 {title}"},
+                    "title": {"tag": "plain_text", "content": f"🎮 {title} · {character_name}"},
                 },
                 "elements": [
                     {"tag": "div", "text": {"tag": "lark_md", "content": detail}},
                     {"tag": "hr"},
                     {"tag": "note", "elements": [
-                        {"tag": "plain_text", "content": f"{character_name}  ·  Tabby Desktop  ·  {timestamp}"}
+                        {"tag": "plain_text", "content": f"Tabby Desktop  ·  {timestamp}"}
                     ]},
                 ],
             },
@@ -3225,6 +3250,128 @@ class MainWindow(QMainWindow):
                 return f"{key}:{value}"
         return hashlib.sha256(json.dumps(item, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def canonical_equipment_quality(item: dict) -> str:
+        """Use the item's rarity field; equipmentLevel is not a rarity value."""
+        for key in ("qualityCode", "rarityCode", "quality", "rarity", "qualityNameZh"):
+            value = item.get(key)
+            if value is None or not str(value).strip():
+                continue
+            canonical = QUALITY_CODE_ALIASES.get(str(value).strip().upper(), "")
+            if canonical:
+                return canonical
+        return ""
+
+    @staticmethod
+    def equipment_stat_map(item: dict) -> dict[str, float]:
+        aliases = {
+            "ATTACK_SPEED": "ATTACK_SPEED_PERCENT", "MOVE_SPEED": "MOVE_SPEED_PERCENT",
+            "CRITICAL": "CRITICAL_CHANCE_PERCENT", "CRITICAL_CHANCE": "CRITICAL_CHANCE_PERCENT",
+            "MAX_HEALTH": "HEALTH", "HEALTH": "HEALTH",
+        }
+        direct = {
+            "attack": "ATTACK", "attackPower": "ATTACK", "defense": "DEFENSE",
+            "maxHealth": "HEALTH", "health": "HEALTH", "healthRegen": "HEALTH_REGEN",
+            "attackSpeedPercent": "ATTACK_SPEED_PERCENT", "moveSpeedPercent": "MOVE_SPEED_PERCENT",
+            "criticalChancePercent": "CRITICAL_CHANCE_PERCENT", "luck": "LUCK",
+        }
+        result: dict[str, float] = {}
+        attributes = item.get("attributes", [])
+        if isinstance(attributes, list):
+            for attribute in attributes:
+                if not isinstance(attribute, dict):
+                    continue
+                code = str(attribute.get("code", "")).upper()
+                code = aliases.get(code, code)
+                try:
+                    value = float(attribute.get("value", 0))
+                except (TypeError, ValueError):
+                    continue
+                if code:
+                    result[code] = result.get(code, 0.0) + value
+        for key, code in direct.items():
+            if code in result:
+                continue
+            try:
+                if item.get(key) is not None:
+                    result[code] = float(item[key])
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @classmethod
+    def equipment_score(cls, item: dict, slot: str = "") -> float:
+        """Estimate gear value in comparable combat points, with small slot-aware tuning."""
+        stats = cls.equipment_stat_map(item)
+        # One attack and one defense point count equally, so mixed upgrades are evaluated
+        # as a whole (e.g. +9 attack/+9 defense beats +10 attack alone).
+        weights = {
+            "ATTACK": 1.0,
+            "DEFENSE": 1.0,
+            "HEALTH": 0.10,  # about 10 max HP per point
+            "HEALTH_REGEN": 2.0,
+            "ATTACK_SPEED_PERCENT": 3.0,
+            "MOVE_SPEED_PERCENT": 2.0 if slot == "SHOES" else 1.0,
+            "CRITICAL_CHANCE_PERCENT": 3.0,
+            "LUCK": 0.5,
+        }
+        return sum(value * weights.get(stat, 0.0) for stat, value in stats.items())
+
+    @classmethod
+    def equipment_tiebreak(cls, item: dict) -> tuple[int, float]:
+        quality_order = {"COMMON": 0, "UNCOMMON": 1, "RARE": 2, "EPIC": 3, "LEGENDARY": 4}
+        quality = cls.canonical_equipment_quality(item)
+        try:
+            level = float(item.get("equipmentLevel", item.get("level", 0)) or 0)
+        except (TypeError, ValueError):
+            level = 0.0
+        return quality_order.get(quality, 0), level
+
+    def auto_equip_best_inventory_item(self) -> None:
+        if (not hasattr(self, "auto_equip_better") or not self.auto_equip_better.isChecked()
+                or self._auto_equip_pending_id is not None):
+            return
+        items = self.api_equipment.get("items", []) if isinstance(self.api_equipment, dict) else []
+        if not isinstance(items, list):
+            return
+        by_slot: dict[str, list[dict]] = {}
+        equipped_by_slot: dict[str, dict] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            slot = str(item.get("slotType", item.get("equipmentType", ""))).upper()
+            if slot not in {"WEAPON", "HAT", "ARMOR", "SHOES", "RING", "AMULET"}:
+                continue
+            if item.get("equipped"):
+                equipped_by_slot[slot] = item
+            elif item.get("playerItemId") is not None:
+                by_slot.setdefault(slot, []).append(item)
+        for slot, candidates in by_slot.items():
+            current = equipped_by_slot.get(slot)
+            scored = [(self.equipment_score(item, slot), self.equipment_tiebreak(item), item)
+                      for item in candidates if self.equipment_stat_map(item)]
+            if not scored:
+                continue
+            best_score, best_tiebreak, best = max(scored, key=lambda row: (row[0], row[1]))
+            current_score = self.equipment_score(current, slot) if current else 0.0
+            current_tiebreak = self.equipment_tiebreak(current) if current else (0, 0.0)
+            # Keep current gear on ties to prevent churn; an empty slot uses zero as baseline.
+            if best_score <= current_score + 1e-6:
+                continue
+            if best_score - current_score < 0.25 and best_tiebreak <= current_tiebreak:
+                continue
+            item_id = str(best.get("playerItemId"))
+            if item_id in self._auto_equip_attempted_ids:
+                continue
+            self._auto_equip_attempted_ids.add(item_id)
+            self._auto_equip_pending_id = item_id
+            name = localized_item_name(best)
+            self.inventory_action_status.setText(
+                f"发现更优{SLOT_NAMES_ZH[slot]}：{name}（综合分 {best_score:.1f}，当前 {current_score:.1f}），正在自动装备…")
+            self.request_social_api("equip", "/equipment/equip", "POST",
+                                    {"playerItemId": best["playerItemId"]})
+            return
+
     def notify_new_equipment(self, equipment: dict) -> None:
         items = equipment.get("items", [])
         if not isinstance(items, list):
@@ -3242,16 +3389,20 @@ class MainWindow(QMainWindow):
             for identity, item in current.items():
                 if identity in self._known_equipment_ids:
                     continue
-                name = str(item.get("itemNameZh") or item.get("itemName") or item.get("name") or item.get("itemCode") or "新装备")
+                raw_name = item.get("name") or item.get("itemName") or item.get("itemCode") or "新装备"
+                name = localized_item_name({**item, "name": raw_name})
                 slot = str(item.get("slotType") or item.get("equipmentType") or "装备")
-                quality = str(item.get("qualityNameZh") or item.get("quality") or item.get("equipmentLevel") or "")
+                quality_code = self.canonical_equipment_quality(item)
+                quality = (QUALITY_NAMES_ZH.get(quality_code, "") or
+                           str(item.get("qualityNameZh") or item.get("quality") or item.get("rarity") or ""))
                 attributes = " · ".join(equipment_attribute_lines(item))
                 detail = f"获得新装备：**{name}**\n\n部位：{SLOT_NAMES_ZH.get(slot.upper(), slot)}"
                 if quality:
                     detail += f"\n品质：{quality}"
                 if attributes:
                     detail += f"\n属性：{attributes}"
-                self.send_lark_notification("装备掉落", detail, "green", "equipment")
+                template = QUALITY_LARK_TEMPLATES.get(quality_code, "green")
+                self.send_lark_notification("装备掉落", detail, template, "equipment")
         self._known_equipment_ids = set(current)
 
     def has_active_monster_quest(self) -> bool:
@@ -3818,6 +3969,8 @@ class MainWindow(QMainWindow):
             return
         if isinstance(data, dict) and data.get("socialApiKey"):
             key = str(data["socialApiKey"])
+            if key == "equip":
+                self._auto_equip_pending_id = None
             if data.get("socialApiError"):
                 if key == "balance":
                     self.balance_label.setText("TABBY 余额：暂不可用")
@@ -3833,10 +3986,19 @@ class MainWindow(QMainWindow):
                         display_amount = f"{float(amount):,.2f}"
                     except (TypeError, ValueError):
                         display_amount = str(amount) if amount is not None else "已读取"
+                    self.tabby_balance_display = display_amount
                     self.balance_label.setText(f"TABBY 余额：{display_amount}")
                     self.balance_label.setToolTip(json.dumps(nested, ensure_ascii=False, indent=2))
                 else:
-                    self.balance_label.setText(f"TABBY 余额：{nested}")
+                    try:
+                        display_amount = f"{float(nested):,.2f}"
+                    except (TypeError, ValueError):
+                        display_amount = str(nested)
+                    self.tabby_balance_display = display_amount
+                    self.balance_label.setText(f"TABBY 余额：{display_amount}")
+                metadata_callback = getattr(self, "on_account_metadata_change", None)
+                if metadata_callback:
+                    metadata_callback()
             elif key in {"equip", "unequip"}:
                 self.inventory_action_status.setText("装备状态已更新，正在刷新背包…")
                 self.refresh_profile_data(force=True)
@@ -3889,6 +4051,7 @@ class MainWindow(QMainWindow):
         if isinstance(equipment, dict) and equipment:
             self.notify_new_equipment(equipment)
             self.api_equipment = equipment
+            self.auto_equip_best_inventory_item()
         progression_data = progression.get("progression", progression) if isinstance(progression, dict) else {}
         if isinstance(progression_data, dict):
             self.last_progress_state.update(progression_data)
@@ -3969,6 +4132,10 @@ class MainWindow(QMainWindow):
         attack = totals.get("attack", totals.get("attackPower", self_state.get("attack", "—")))
         defense = totals.get("defense", self_state.get("defense", "—"))
         gold = profile.get("gold", self_state.get("gold", "—"))
+        try:
+            gold_display = f"{float(gold):,.2f}"
+        except (TypeError, ValueError):
+            gold_display = str(gold)
         status = "阵亡" if self.server_dead else "存活"
         if hasattr(self, "health_bar"):
             try:
@@ -3990,7 +4157,7 @@ class MainWindow(QMainWindow):
             try:
                 stamina = float(farming["staminaPercent"])
                 self.fatigue_bar.setValue(round(max(0, min(100, stamina))))
-                self.fatigue_bar.setFormat(f"剩余 {stamina:.0f}%")
+                self.fatigue_bar.setFormat(f"剩余 {stamina:.2f}%")
             except (KeyError, TypeError, ValueError):
                 self.fatigue_bar.setFormat("等待疲劳数据")
         if hasattr(self, "resource_chips"):
@@ -4015,7 +4182,7 @@ class MainWindow(QMainWindow):
             values = {"角色": name, "职业": class_display,
                       "等级": level, "状态": status,
                       "经验": f"{experience}/{experience_needed}", "攻击": attack, "防御": defense,
-                      "金币": gold, "移速加成": f"{totals.get('moveSpeedPercent', 0)}%"}
+                      "金币": gold_display, "移速加成": f"{totals.get('moveSpeedPercent', 0)}%"}
             for key, value in values.items():
                 if key in self.character_facts:
                     self.character_facts[key].setText(str(value))
@@ -4045,7 +4212,7 @@ class MainWindow(QMainWindow):
                     label.setStyleSheet("background:#191D1E;border:1px solid #363D3C;border-radius:6px;padding:6px;color:#958976;")
         self.character_status.setText(
             f"{name} · {class_display}  |  等级 {level}  |  经验 {experience}/{experience_needed}  |  "
-            f"生命 {health}/{max_health}  |  攻击 {attack}  |  防御 {defense}  |  金币 {gold}  |  {status}"
+            f"生命 {health}/{max_health}  |  攻击 {attack}  |  防御 {defense}  |  金币 {gold_display}  |  {status}"
         )
 
     def accept_attack_ticket(self, ticket: dict) -> None:
@@ -5026,6 +5193,10 @@ class MainWindow(QMainWindow):
 
     def start_patrol(self) -> None:
         """Search the current map while waiting for server-reported spawns."""
+        if self.current_map == 1:
+            self.stop_patrol(reset_anchor=True)
+            self.combat_status.setText("主城没有怪物，已暂停自动搜索；进入野外地图后会继续找怪。")
+            return
         if (self.current_map not in MAP_NAMES or self.world_x is None or self.world_y is None
                 or self.ws is None or not self.world_ready or not self.auto_attack.isChecked()
                 or self.server_dead or self.respawn_pending or self.pending_destination is not None):
@@ -5078,6 +5249,7 @@ class MainWindow(QMainWindow):
 
     def advance_patrol(self) -> None:
         if (self.ws is None or not self.world_ready or self.current_map not in MAP_NAMES
+                or self.current_map == 1
                 or not self.auto_attack.isChecked()
                 or self.server_dead or self.respawn_pending or self.pending_destination is not None
                 or self.chase_target is not None):

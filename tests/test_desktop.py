@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel, QMessageBox,
-                               QPushButton, QTableWidget, QTabWidget, QCheckBox)
+                               QPushButton, QTableWidget, QTabWidget, QCheckBox, QFrame)
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QSettings, QTimer
 from PySide6.QtGui import QImage
 from desktop import DesktopWindow, shop
@@ -107,6 +107,126 @@ class DesktopTests(unittest.TestCase):
                          ['尾号 111', '尾号 222', '尾号 333'])
         self.assertTrue(all(box.toolTip() == address for address, box
                             in self.window.planner_account_checks.items()))
+
+    def test_account_rows_compact_wallet_address_and_copy_full_address(self):
+        address = '0x1234567890abcdef1234567890abcdef12345678'
+        with patch.object(self.window.game.credential_vault, 'list_wallets', return_value=[address]):
+            self.window.refresh_account_rows()
+
+        row = self.window.account_rows.itemAt(0).widget()
+        shown_address = row.findChild(QLabel, 'walletAddress')
+        copy_button = row.findChild(QPushButton, 'walletCopyAddress')
+        self.assertEqual(shown_address.text(), '0x1…5678')
+        self.assertEqual(shown_address.toolTip(), address)
+        copy_button.click()
+        self.assertEqual(self.app.clipboard().text(), address)
+        self.assertEqual(copy_button.text(), '已复制')
+
+    def test_account_summary_shows_experience_and_two_decimal_resources(self):
+        game = type('GameSummary', (), {})()
+        game.api_profile = {'playerName': 'Hero', 'gold': 1234.5}
+        game.last_progress_state = {'level': 12, 'experience': 1234, 'experienceNeeded': 5678}
+        game.api_equipment = {'totals': {'attack': 8}}
+        game.last_self_state = {'farming': {'staminaPercent': 98.5}}
+        game.character_facts = {}
+        game.tabby_balance_display = '6,305.93'
+        summary = DesktopWindow.account_summary(game)
+        self.assertIn('经验 1,234/5,678', summary)
+        self.assertIn('疲劳 98.50%', summary)
+        self.assertIn('金币 1,234.50', summary)
+        self.assertIn('TABBY 6,305.93', summary)
+
+    def test_auto_equip_uses_weighted_total_for_mixed_stat_upgrades(self):
+        game = self.window.game
+        game.auto_equip_better.setChecked(True)
+        game.api_equipment = {'items': [
+            {'playerItemId': 'worn', 'slotType': 'WEAPON', 'equipped': True,
+             'attributes': [{'code': 'ATTACK', 'value': 8}, {'code': 'DEFENSE', 'value': 5}]},
+            {'playerItemId': 'attack', 'slotType': 'WEAPON', 'equipped': False,
+             'attributes': [{'code': 'ATTACK', 'value': 10}]},
+            {'playerItemId': 'balanced', 'slotType': 'WEAPON', 'equipped': False,
+             'attributes': [{'code': 'ATTACK', 'value': 9}, {'code': 'DEFENSE', 'value': 9}]},
+        ]}
+        calls = []
+        game.request_social_api = lambda *args: calls.append(args)
+        game.auto_equip_best_inventory_item()
+        self.assertEqual(calls[0][0:4], ('equip', '/equipment/equip', 'POST', {'playerItemId': 'balanced'}))
+
+        game._auto_equip_pending_id = None
+        game._auto_equip_attempted_ids.clear()
+        # A 9 attack / 2 defense cross-trade is weaker than the currently equipped 8/5 set.
+        game.api_equipment['items'][2]['attributes'][0]['value'] = 9
+        game.api_equipment['items'][2]['attributes'][1]['value'] = 2
+        game.api_equipment['items'] = game.api_equipment['items'][:2] + [game.api_equipment['items'][2]]
+        calls.clear()
+        game.auto_equip_best_inventory_item()
+        self.assertEqual(calls, [])
+
+    def test_planner_account_selector_expands_to_show_two_rows(self):
+        addresses = ['0x' + 'a' * 37 + f'{index:03}' for index in range(11)]
+        with patch.object(self.window.game.credential_vault, 'list_wallets', return_value=addresses):
+            self.window.refresh_planner_accounts()
+        self.assertEqual(len(self.window.planner_account_checks), 11)
+        self.assertGreaterEqual(self.window.planner_accounts_scroll.height(), 60)
+        self.assertEqual(self.window.planner_accounts_scroll.maximumHeight(), 64)
+
+    def test_town_does_not_start_monster_search_patrol(self):
+        game = self.window.game
+        game.current_map = 1
+        game.world_x, game.world_y = 100.0, 100.0
+        game.ws = object()
+        game.world_ready = True
+        game.auto_attack.setChecked(True)
+        game.start_patrol()
+        self.assertFalse(game.patrol_timer.isActive())
+        self.assertIn('主城没有怪物', game.combat_status.text())
+        game.ws = None
+
+    def test_wallet_login_challenge_is_approved_without_modal_prompt(self):
+        approval = {'automatic': True, 'approved': False, 'event': threading.Event(),
+                    'message': 'login challenge'}
+        with patch.object(QMessageBox, 'exec') as show_dialog:
+            self.window.game.confirm_sign_challenge(approval)
+        show_dialog.assert_not_called()
+        self.assertTrue(approval['approved'])
+        self.assertTrue(approval['event'].is_set())
+
+    def test_batch_online_connects_selected_wallets_sequentially(self):
+        addresses = ['0x' + 'a' * 37 + suffix for suffix in ('222', '111')]
+        vault = self.window.game.credential_vault
+        with (patch.object(vault, 'list_wallets', return_value=addresses),
+              patch.object(vault, 'load_wallet', return_value='local-test-key'),
+              patch.object(self.window, 'ask_shared_passphrase', return_value='shared123'),
+              patch.object(self.window, 'connect_account') as connect,
+              patch.object(QTimer, 'singleShot')):
+            self.window.refresh_planner_accounts()
+            self.window.set_all_planner_accounts(True)
+            self.window.batch_connect_accounts()
+            self.assertEqual(connect.call_args.args[0], addresses[1])
+            self.window._finish_batch_login_result(
+                addresses[1], {'ok': True, 'token': 'first-session'})
+            self.window._continue_batch_login()
+            self.assertEqual(connect.call_args.args[0], addresses[0])
+            self.window._finish_batch_login_result(
+                addresses[0], {'ok': True, 'token': 'second-session'})
+            self.window._continue_batch_login()
+        self.assertIn('批量上线已发起 2 个账号', self.window.planner_status.text())
+
+    def test_batch_offline_disconnects_selected_online_accounts(self):
+        address = '0x' + 'a' * 37 + '111'
+        game = self.window.game
+        game.status.setText('已连接')
+        game.auto_attack.setChecked(True)
+        self.window._game_sessions[address.lower()] = game
+        selected = QCheckBox()
+        selected.setChecked(True)
+        self.window.planner_account_checks = {address: selected}
+        with (patch.object(game, 'disconnect_ws') as disconnect,
+              patch.object(self.window, 'refresh_account_rows')):
+            self.window.batch_disconnect_accounts()
+        disconnect.assert_called_once_with()
+        self.assertFalse(game.auto_attack.isChecked())
+        self.assertIn('已批量下线 1 个账号', self.window.planner_status.text())
 
     def test_vault_passphrase_is_cached_globally_and_kept_after_login_failure(self):
         phrase = 'shared-vault-passphrase'
@@ -689,6 +809,42 @@ class DesktopTests(unittest.TestCase):
         game.lark_webhook.clear()
         self.assertEqual(game.settings.value('larkWebhook', ''), '')
 
+    def test_lark_card_includes_character_name_and_quality_color_template(self):
+        game = self.window.game
+        previous_settings = game.settings
+        temporary_settings = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_settings.cleanup)
+        self.addCleanup(setattr, game, 'settings', previous_settings)
+        game.settings = QSettings(str(Path(temporary_settings.name) / 'settings.ini'),
+                                  QSettings.Format.IniFormat)
+        game.lark_webhook.setText('https://open.larksuite.com/open-apis/bot/v2/hook/test-secret')
+        game.character_facts['角色'].setText('冰霜勇士')
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"code":0}'
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch('game_client.wss_tester.urllib.request.urlopen', return_value=Response()) as urlopen, \
+             patch('game_client.wss_tester.threading.Thread', side_effect=ImmediateThread):
+            game.send_lark_notification('装备掉落', '传说装备', 'red', 'equipment')
+
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(payload['card']['header']['template'], 'red')
+        self.assertIn('冰霜勇士', payload['card']['header']['title']['content'])
+
     def test_notification_preferences_are_available_in_the_new_top_level_tab(self):
         game = self.window.game
         top_tabs = next(tab for tab in self.window.findChildren(QTabWidget)
@@ -734,7 +890,8 @@ class DesktopTests(unittest.TestCase):
 
             equipment = {'items': [{'playerItemId': 'drop-1', 'itemKind': 'EQUIPMENT',
                                     'itemName': '冰霜长剑', 'slotType': 'WEAPON',
-                                    'attributes': []}]}
+                                    'qualityCode': 'L4', 'quality': 'COMMON',
+                                    'equipmentLevel': 1, 'attributes': []}]}
             game.notify_new_equipment(equipment)  # Initial inventory is only a baseline.
             self.assertEqual(notify.call_count, 1)
             game.notify_new_equipment({'items': [*equipment['items'], {
@@ -743,6 +900,15 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(notify.call_count, 2)
             self.assertEqual(notify.call_args.args[0], '装备掉落')
             self.assertIn('新护甲', notify.call_args.args[1])
+            self.assertEqual(notify.call_args.args[2], 'green')
+
+            game.notify_new_equipment({'items': [*equipment['items'], {
+                'playerItemId': 'drop-3', 'itemKind': 'EQUIPMENT', 'itemName': '传说枪',
+                'slotType': 'WEAPON', 'qualityCode': 'L4', 'quality': 'COMMON',
+                'equipmentLevel': 1, 'attributes': [],
+            }]})
+            self.assertEqual(notify.call_args.args[2], 'red')
+            self.assertIn('品质：传说', notify.call_args.args[1])
 
     def test_monster_level_range_is_opt_in_and_filters_combat_targets(self):
         game = self.window.game
@@ -1030,6 +1196,7 @@ class DesktopTests(unittest.TestCase):
         game.auto_attack.blockSignals(True)
         game.auto_attack.setChecked(True)
         game.auto_attack.blockSignals(False)
+        game.monster_level_limited.setChecked(False)
         game.next_attack = {}
 
         with patch('game_client.wss_tester.find_map_path', return_value=[(3872, 7168)]):
@@ -1039,7 +1206,7 @@ class DesktopTests(unittest.TestCase):
 
         game.monsters = {'new-monster': {
             'encounterId': 'new-monster', 'mapId': 2, 'x': 3872,
-            'y': 7488, 'health': 100, 'monsterRank': 'NORMAL',
+            'y': 7488, 'health': 100, 'level': 1, 'monsterRank': 'NORMAL',
         }}
         game.auto_attack_tick()
         self.assertFalse(game.patrol_timer.isActive())
@@ -1048,7 +1215,7 @@ class DesktopTests(unittest.TestCase):
         game.combat_timer.stop()
         game.ws = None
 
-    def test_auto_combat_patrols_all_other_maps_without_monsters(self):
+    def test_auto_combat_patrols_outside_town_without_monsters(self):
         game = self.window.game
         game.ws = object()
         game.world_ready = True
@@ -1066,8 +1233,12 @@ class DesktopTests(unittest.TestCase):
                 game.current_map = map_id
                 game.world_x, game.world_y = x, y
                 game.auto_attack_tick()
-                self.assertTrue(game.patrol_timer.isActive())
-                self.assertTrue(game.patrol_route)
+                if map_id == 1:
+                    self.assertFalse(game.patrol_timer.isActive())
+                    self.assertFalse(game.patrol_route)
+                else:
+                    self.assertTrue(game.patrol_timer.isActive())
+                    self.assertTrue(game.patrol_route)
 
         game.stop_patrol(reset_anchor=True)
         game.combat_timer.stop()
