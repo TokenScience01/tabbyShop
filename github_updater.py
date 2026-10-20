@@ -151,9 +151,17 @@ def _windows_update_script(stage: Path, staged_app: Path, install_dir: Path,
         "if not exist \"%LOCALAPPDATA%\\TabbyDesktop\" mkdir \"%LOCALAPPDATA%\\TabbyDesktop\" >nul 2>&1\r\n"
         ">\"%LOG%\" echo Tabby update started.\r\n"
         ">>\"%LOG%\" echo Install directory: %TARGET%\r\n"
+        ">>\"%LOG%\" echo Waiting for application process %APP_PID%.\r\n"
+        "set /a WAITED=0\r\n"
         ":wait\r\n"
         "tasklist /FI \"PID eq %APP_PID%\" | find \"%APP_PID%\" >nul\r\n"
-        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
+        "if errorlevel 1 goto stopped\r\n"
+        "if %WAITED% GEQ 120 goto failed\r\n"
+        "timeout /t 1 /nobreak >nul\r\n"
+        "set /a WAITED+=1\r\n"
+        "goto wait\r\n"
+        ":stopped\r\n"
+        ">>\"%LOG%\" echo Application exited; replacing files.\r\n"
         "if exist \"%BACKUP%\" rmdir /s /q \"%BACKUP%\" >>\"%LOG%\" 2>&1\r\n"
         "if exist \"%BACKUP%\" goto failed\r\n"
         "if not exist \"%TARGET%\" goto install\r\n"
@@ -184,7 +192,8 @@ def launch_update_script(script: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("自动替换目前只支持 Windows 桌面版")
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    command = f'"{os.environ.get("COMSPEC", "cmd.exe")}" /d /s /c ""{script.resolve()}""'
+    command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c",
+               f'call "{script.resolve()}"']
     subprocess.Popen(command, creationflags=flags, close_fds=True)
 
 

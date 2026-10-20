@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
                               QStackedWidget, QButtonGroup, QDialog, QMessageBox,
                               QFrame, QPlainTextEdit, QInputDialog, QLineEdit,
-                              QScrollArea)
+                              QScrollArea, QCheckBox, QComboBox, QSpinBox)
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
@@ -136,6 +136,9 @@ class DesktopWindow(QMainWindow):
             QLabel#walletAccountState { color: #8E9994; font-size: 10px; }
             QLabel#walletAccountDetails { color: #C5CECA; font-size: 11px; }
             QLabel#walletStatusDot { border-radius: 5px; }
+            QFrame#multiAccountPlanner { background:#1B2020; border:1px solid #343B39; border-radius:10px; }
+            QLabel#plannerTitle { color:#E8ECEB; font-size:14px; font-weight:700; }
+            QLabel#plannerHint { color:#8E9994; font-size:11px; }
         """)
         root = QWidget()
         root.setObjectName('root')
@@ -323,6 +326,7 @@ class DesktopWindow(QMainWindow):
         self.account_count = QLabel('0 个账号')
         self.account_count.setObjectName('accountManagerCount')
         layout.addWidget(self.account_count)
+        self.build_multi_account_planner(layout)
         self.account_rows = QVBoxLayout()
         self.account_rows.setContentsMargins(0, 0, 0, 0)
         self.account_rows.setSpacing(9)
@@ -356,6 +360,185 @@ class DesktopWindow(QMainWindow):
         note.setWordWrap(True)
         layout.addWidget(note)
         return page
+
+    def build_multi_account_planner(self, parent_layout):
+        """Add a small coordinator for applying one play mode to many accounts."""
+        card = QFrame()
+        card.setObjectName('multiAccountPlanner')
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(8)
+        heading = QHBoxLayout()
+        title = QLabel('多账号任务编排')
+        title.setObjectName('plannerTitle')
+        heading.addWidget(title)
+        heading.addStretch(1)
+        self.planner_select_all = QCheckBox('全选账号')
+        self.planner_select_all.toggled.connect(self.set_all_planner_accounts)
+        heading.addWidget(self.planner_select_all)
+        layout.addLayout(heading)
+
+        self.planner_account_checks = {}
+        self.planner_accounts_content = QWidget()
+        self.planner_accounts_layout = QHBoxLayout(self.planner_accounts_content)
+        self.planner_accounts_layout.setContentsMargins(0, 0, 0, 0)
+        self.planner_accounts_layout.setSpacing(12)
+        self.planner_accounts_layout.addWidget(QLabel('请先导入钱包'))
+        self.planner_accounts_layout.addStretch(1)
+        account_scroll = QScrollArea()
+        account_scroll.setWidgetResizable(True)
+        account_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        account_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        account_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        account_scroll.setMaximumHeight(38)
+        account_scroll.setWidget(self.planner_accounts_content)
+        layout.addWidget(account_scroll)
+
+        controls = QHBoxLayout()
+        self.planner_mode = QComboBox()
+        self.planner_mode.addItem('自动任务：接任务并按任务地图战斗', 'quests')
+        self.planner_mode.addItem('自由刷怪：留在各账号当前地图', 'farm')
+        self.planner_mode.addItem('精英狩猎：只攻击精英怪', 'elite')
+        self.planner_mode.setMinimumWidth(260)
+        controls.addWidget(self.planner_mode)
+        self.planner_use_potion = QCheckBox('允许自动用药')
+        self.planner_use_potion.setChecked(False)
+        controls.addWidget(self.planner_use_potion)
+        self.planner_limit_level = QCheckBox('等级范围')
+        controls.addWidget(self.planner_limit_level)
+        self.planner_level_min = QSpinBox()
+        self.planner_level_min.setRange(1, 9999)
+        self.planner_level_min.setPrefix('最低 ')
+        self.planner_level_min.setValue(1)
+        controls.addWidget(self.planner_level_min)
+        self.planner_level_max = QSpinBox()
+        self.planner_level_max.setRange(1, 9999)
+        self.planner_level_max.setPrefix('最高 ')
+        self.planner_level_max.setValue(9999)
+        controls.addWidget(self.planner_level_max)
+        self.planner_limit_level.toggled.connect(self.planner_level_min.setEnabled)
+        self.planner_limit_level.toggled.connect(self.planner_level_max.setEnabled)
+        self.planner_level_min.setEnabled(False)
+        self.planner_level_max.setEnabled(False)
+        layout.addLayout(controls)
+
+        actions = QHBoxLayout()
+        self.planner_start = QPushButton('启动所选账号')
+        self.planner_start.setObjectName('primaryButton')
+        self.planner_start.clicked.connect(self.start_multi_account_plan)
+        self.planner_pause = QPushButton('暂停方案')
+        self.planner_pause.setObjectName('secondaryButton')
+        self.planner_pause.clicked.connect(self.pause_multi_account_plan)
+        self.planner_stop = QPushButton('停止方案')
+        self.planner_stop.setObjectName('secondaryButton')
+        self.planner_stop.clicked.connect(self.stop_multi_account_plan)
+        actions.addWidget(self.planner_start)
+        actions.addWidget(self.planner_pause)
+        actions.addWidget(self.planner_stop)
+        actions.addStretch(1)
+        self.planner_status = QLabel('选择已连接账号后，可将同一玩法配置应用到多个角色。')
+        self.planner_status.setObjectName('plannerHint')
+        actions.addWidget(self.planner_status, 2)
+        layout.addLayout(actions)
+        parent_layout.addWidget(card)
+
+    def refresh_planner_accounts(self):
+        selected = {address: box.isChecked()
+                    for address, box in self.planner_account_checks.items()}
+        while self.planner_accounts_layout.count():
+            item = self.planner_accounts_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.planner_account_checks = {}
+        addresses = self.game.credential_vault.list_wallets()
+        for address in addresses:
+            box = QCheckBox(address[:8] + '…' + address[-6:])
+            box.setToolTip(address)
+            box.setChecked(selected.get(address, selected.get(address.lower(), False)))
+            box.toggled.connect(self.update_planner_select_all)
+            self.planner_account_checks[address] = box
+            self.planner_accounts_layout.addWidget(box)
+        self.planner_accounts_layout.addStretch(1)
+        self.planner_select_all.blockSignals(True)
+        self.planner_select_all.setChecked(bool(addresses) and all(
+            box.isChecked() for box in self.planner_account_checks.values()))
+        self.planner_select_all.blockSignals(False)
+
+    def set_all_planner_accounts(self, checked):
+        for box in self.planner_account_checks.values():
+            box.blockSignals(True)
+            box.setChecked(checked)
+            box.blockSignals(False)
+
+    def update_planner_select_all(self, *_args):
+        boxes = list(self.planner_account_checks.values())
+        self.planner_select_all.blockSignals(True)
+        self.planner_select_all.setChecked(bool(boxes) and all(box.isChecked() for box in boxes))
+        self.planner_select_all.blockSignals(False)
+
+    def selected_planner_games(self):
+        selected = {address.lower() for address, box in self.planner_account_checks.items()
+                    if box.isChecked()}
+        return [(address, game) for address, game in self._game_sessions.items()
+                if address.lower() in selected]
+
+    def start_multi_account_plan(self):
+        selected = [address for address, box in self.planner_account_checks.items() if box.isChecked()]
+        if not selected:
+            self.planner_status.setText('请先选择至少一个账号。')
+            return
+        mode = self.planner_mode.currentData()
+        started, offline = 0, 0
+        for address in selected:
+            game = self._game_sessions.get(address.lower())
+            if game is None or game.status.text() != '已连接':
+                offline += 1
+                continue
+            game.auto_potion.setChecked(self.planner_use_potion.isChecked())
+            limited = self.planner_limit_level.isChecked()
+            low, high = self.planner_level_min.value(), self.planner_level_max.value()
+            if low > high:
+                low, high = high, low
+            game.monster_level_limited.setChecked(limited)
+            game.monster_level_min.setValue(low)
+            game.monster_level_max.setValue(high)
+            game.auto_quest.setChecked(mode == 'quests')
+            game.quest_map_auto.setChecked(mode == 'quests')
+            game.elite_only.setChecked(mode == 'elite')
+            game.task_limited_mode.setChecked(False)
+            game.auto_attack.setChecked(True)
+            if mode == 'quests':
+                game.accept_next_monster_quest()
+            started += 1
+        self.planner_status.setText(
+            f'已启动 {started} 个账号' + (f'；跳过离线账号 {offline} 个' if offline else '') + '。')
+
+    def pause_multi_account_plan(self):
+        games = self.selected_planner_games()
+        for _address, game in games:
+            game.auto_attack.setChecked(False)
+            game.auto_quest.setChecked(False)
+            game.quest_map_auto.setChecked(False)
+            game.move_timer.stop()
+            game.pending_destination = None
+            game.pending_portal = None
+            game.route_points = []
+            game.update_map_buttons()
+        self.planner_status.setText(f'已暂停 {len(games)} 个所选账号的自动任务、移动与战斗。')
+
+    def stop_multi_account_plan(self):
+        games = self.selected_planner_games()
+        for _address, game in games:
+            game.auto_attack.setChecked(False)
+            game.auto_quest.setChecked(False)
+            game.quest_map_auto.setChecked(False)
+            game.move_timer.stop()
+            game.pending_destination = None
+            game.pending_portal = None
+            game.route_points = []
+            game.update_map_buttons()
+        self.planner_status.setText(f'已停止 {len(games)} 个所选账号的自动任务与战斗。')
 
     def load_shop_profiles(self):
         try:
@@ -398,6 +581,7 @@ class DesktopWindow(QMainWindow):
             if widget:
                 widget.deleteLater()
         addresses = self.game.credential_vault.list_wallets()
+        self.refresh_planner_accounts()
         self.account_count.setText(f'{len(addresses)} 个账号')
         self.account_empty.setVisible(not addresses)
         for address in addresses:

@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel, QMessageBox,
-                               QPushButton, QTableWidget, QTabWidget)
+                               QPushButton, QTableWidget, QTabWidget, QCheckBox)
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QSettings, QTimer
 from PySide6.QtGui import QImage
 from desktop import DesktopWindow, shop
@@ -59,6 +59,38 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(self.window.game.dashboard_header.isHidden())
         self.window.game.set_state('已连接')
         self.assertIn('已连接', self.window.account_status.text())
+
+    def test_multi_account_planner_applies_mode_to_selected_connected_accounts(self):
+        game = self.window.game
+        address = '0x' + 'a' * 40
+        game.status.setText('已连接')
+        self.window._game_sessions[address.lower()] = game
+        selected = QCheckBox()
+        selected.setChecked(True)
+        self.window.planner_account_checks = {address: selected}
+        self.window.planner_mode.setCurrentIndex(self.window.planner_mode.findData('quests'))
+        self.window.planner_use_potion.setChecked(True)
+        self.window.planner_limit_level.setChecked(True)
+        self.window.planner_level_min.setValue(10)
+        self.window.planner_level_max.setValue(30)
+
+        self.window.start_multi_account_plan()
+
+        self.assertTrue(game.auto_attack.isChecked())
+        self.assertTrue(game.auto_quest.isChecked())
+        self.assertTrue(game.quest_map_auto.isChecked())
+        self.assertTrue(game.auto_potion.isChecked())
+        self.assertTrue(game.monster_level_limited.isChecked())
+        self.assertEqual((game.monster_level_min.value(), game.monster_level_max.value()), (10, 30))
+        self.assertIn('已启动 1 个账号', self.window.planner_status.text())
+
+        self.window.pause_multi_account_plan()
+        self.assertFalse(game.auto_attack.isChecked())
+        self.assertFalse(game.auto_quest.isChecked())
+        self.assertFalse(game.quest_map_auto.isChecked())
+        self.window.stop_multi_account_plan()
+        self.assertFalse(game.auto_quest.isChecked())
+        self.assertFalse(game.quest_map_auto.isChecked())
 
     def test_vault_passphrase_is_cached_globally_and_kept_after_login_failure(self):
         phrase = 'shared-vault-passphrase'
@@ -150,6 +182,99 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(game.character_creation_required)
         self.assertFalse(game.create_character_button.isHidden())
         self.assertFalse(game.character_creation_prompted)
+
+    def test_login_preflight_pauses_world_entry_for_new_character(self):
+        game = self.window.game
+        game.pending_world_entry = True
+        game.can_prompt_character_creation = lambda: False
+        with patch.object(game, 'connect_ws') as connect_ws:
+            game.accept_profile_data({
+                'loginPreflight': True,
+                'player': {'player': {'characterCreated': False}},
+            })
+        self.assertTrue(game.character_creation_required)
+        self.assertTrue(game.pending_world_entry)
+        self.assertFalse(game.create_character_button.isHidden())
+        connect_ws.assert_not_called()
+
+    def test_login_preflight_enters_world_for_existing_character(self):
+        game = self.window.game
+        game.pending_world_entry = True
+        game.signed_session_token = 'test-session'
+        with patch.object(game, 'connect_ws') as connect_ws:
+            game.accept_profile_data({
+                'loginPreflight': True,
+                'player': {'player': {'characterCreated': True, 'playerName': 'Hero'}},
+            })
+        self.assertFalse(game.pending_world_entry)
+        connect_ws.assert_called_once()
+
+    def test_login_preflight_error_does_not_attempt_websocket_login(self):
+        game = self.window.game
+        game.pending_world_entry = True
+        with patch.object(game, 'connect_ws') as connect_ws:
+            game.accept_profile_data({
+                'loginPreflight': True,
+                'loginPreflightError': 'HTTP 502',
+            })
+        self.assertTrue(game.pending_world_entry)
+        self.assertEqual(game.connect_button.text(), '重试读取角色')
+        connect_ws.assert_not_called()
+
+    def test_login_preflight_fetches_player_with_signed_bearer_token(self):
+        received = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received['path'] = self.path
+                received['authorization'] = self.headers.get('Authorization')
+                payload = json.dumps({'player': {'characterCreated': False}}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        game = self.window.game
+        game.url.setText(f'ws://127.0.0.1:{server.server_port}/api/realtime')
+        game.signed_session_token = 'signed-test-session'
+        game.pending_world_entry = True
+        game.can_prompt_character_creation = lambda: False
+        loop = QEventLoop()
+        game.bridge.profile.connect(
+            lambda payload: loop.quit() if isinstance(payload, dict)
+            and payload.get('loginPreflight') else None)
+        try:
+            with patch.object(game, 'connect_ws') as connect_ws:
+                game.preflight_character_then_enter()
+                QTimer.singleShot(3000, loop.quit)
+                loop.exec()
+            self.assertEqual(received['path'], '/api/player')
+            self.assertEqual(received['authorization'], 'Bearer signed-test-session')
+            self.assertTrue(game.character_creation_required)
+            self.assertTrue(game.pending_world_entry)
+            connect_ws.assert_not_called()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_character_creation_completes_pending_world_entry(self):
+        game = self.window.game
+        game.pending_world_entry = True
+        game.character_creation_required = True
+        game.signed_session_token = 'test-session'
+        with patch.object(game, 'connect_ws') as connect_ws:
+            game.accept_profile_data({'characterCreationResult': {
+                'playerName': 'NewHero', 'characterClass': 'GUARD', 'characterCreated': True,
+            }})
+            self.app.processEvents()
+        self.assertFalse(game.pending_world_entry)
+        connect_ws.assert_called_once()
 
     def test_character_creation_posts_published_endpoint_payload(self):
         received = {}

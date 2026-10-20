@@ -794,6 +794,11 @@ class MainWindow(QMainWindow):
         self.character_creation_required = False
         self.character_creation_prompted = False
         self.character_creation_inflight = False
+        # A signed membership session is not yet a playable character session.
+        # Check /player before attempting the realtime world login so new
+        # wallets can create their character first.
+        self.pending_world_entry = False
+        self.login_preflight_inflight = False
         self.can_prompt_character_creation = lambda: True
         self.on_vault_unlocked = lambda _passphrase: None
         self.last_progress_state = {}
@@ -1972,6 +1977,9 @@ class MainWindow(QMainWindow):
         return phrase
 
     def connect_ws(self) -> None:
+        if self.pending_world_entry and self.get_session_token():
+            self.preflight_character_then_enter()
+            return
         if not self._auto_reconnect_login:
             self.reconnect_timer.stop()
             self._reconnect_attempt = 0
@@ -2406,8 +2414,53 @@ class MainWindow(QMainWindow):
             self.append_log("钱包私钥已加密分片保存并完成解密校验；主密码未写入磁盘。")
             self.bridge.keyring_status.emit("AES-GCM 校验成功；三片密文已保存。")
         self.append_log(f"钱包签名验证成功：{address[:8]}…{address[-6:]}；游戏 token 已留在内存中。")
-        self._resolved_token = self.session_token
-        self.connect_ws()
+        self.pending_world_entry = True
+        self.preflight_character_then_enter()
+
+    def preflight_character_then_enter(self) -> None:
+        """Read the signed-in player before opening the realtime world socket."""
+        if self.login_preflight_inflight or not self.pending_world_entry:
+            return
+        token = self.get_session_token()
+        parsed = urllib.parse.urlsplit(self.url.text().strip())
+        if not token or not parsed.netloc:
+            self.append_log("无法读取角色资料：游戏会话 Token 或服务器地址缺失。")
+            self.bridge.state.emit("无法读取角色资料；请检查登录状态和服务器地址。")
+            return
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        api_path = parsed.path.rstrip("/")
+        if api_path.endswith("/realtime"):
+            api_path = api_path[:-len("/realtime")]
+        api_root = urllib.parse.urlunsplit((scheme, parsed.netloc, api_path, "", ""))
+        self.login_preflight_inflight = True
+        self.connect_button.setEnabled(False)
+        self.bridge.state.emit("正在读取角色资料…")
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(
+                    api_root + "/player",
+                    headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+                    method="GET",
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or not isinstance(payload, dict):
+                        raise RuntimeError("服务端返回了无法识别的角色资料")
+                self.bridge.profile.emit({"loginPreflight": True, "player": payload})
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail_payload = json.loads(exc.read().decode("utf-8", "replace"))
+                except (TypeError, ValueError):
+                    detail_payload = {}
+                detail = (detail_payload.get("message") or detail_payload.get("error")
+                          or detail_payload.get("code") or f"HTTP {exc.code}")
+                self.bridge.profile.emit({"loginPreflight": True, "loginPreflightError": str(detail)})
+            except Exception as exc:
+                self.bridge.profile.emit({"loginPreflight": True,
+                                          "loginPreflightError": f"{type(exc).__name__}: {exc}"})
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def read_loop(self, ws: MiniWebSocket) -> None:
         try:
@@ -3701,6 +3754,38 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def accept_profile_data(self, data: dict) -> None:
+        if isinstance(data, dict) and data.get("loginPreflight"):
+            self.login_preflight_inflight = False
+            self.connect_button.setEnabled(True)
+            if data.get("loginPreflightError"):
+                detail = str(data["loginPreflightError"])
+                self.connect_button.setText("重试读取角色")
+                self.append_log("已完成钱包签名，但读取角色资料失败；暂不连接游戏世界：" + detail)
+                self.bridge.state.emit("读取角色资料失败；点击连接重试。")
+                return
+
+            payload = data.get("player")
+            player = payload.get("player", payload) if isinstance(payload, dict) else {}
+            self.api_profile = player if isinstance(player, dict) else {}
+            if profile_needs_character_creation(self.api_profile):
+                self.character_creation_required = True
+                self.create_character_button.setText("创建角色")
+                self.create_character_button.setToolTip("服务端确认这个钱包还没有游戏角色")
+                self.create_character_button.setEnabled(True)
+                self.create_character_button.show()
+                self.bridge.state.emit("账号尚未创建角色；请先创建角色。")
+                self.append_log("新账号尚未创建角色，已暂停游戏连接并打开角色创建入口。")
+                self.maybe_prompt_character_creation()
+                return
+
+            self.pending_world_entry = False
+            if self.api_profile.get("characterCreated") is True:
+                self.create_character_button.hide()
+                self.character_creation_prompted = False
+            self.append_log("角色资料读取成功，正在进入游戏世界。")
+            self._resolved_token = self.get_session_token()
+            self.connect_ws()
+            return
         if isinstance(data, dict) and ("characterCreationResult" in data or "characterCreationError" in data):
             self.character_creation_inflight = False
             if "characterCreationResult" in data:
@@ -3718,6 +3803,11 @@ class MainWindow(QMainWindow):
                 metadata_callback = getattr(self, "on_account_metadata_change", None)
                 if metadata_callback:
                     metadata_callback()
+                if self.pending_world_entry:
+                    self.pending_world_entry = False
+                    self.append_log("角色已创建，正在进入游戏世界。")
+                    self._resolved_token = self.get_session_token()
+                    QTimer.singleShot(0, self.connect_ws)
             else:
                 detail = str(data.get("characterCreationError") or "请稍后重试")
                 self.create_character_button.setEnabled(True)

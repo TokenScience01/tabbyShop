@@ -14,7 +14,7 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertEqual(updater.version_tuple('v2.10.3'), (2, 10, 3, 0))
         self.assertGreater(updater.version_tuple('1.2.10'), updater.version_tuple('1.2.9'))
         self.assertEqual(updater.version_tuple('1.2'), updater.version_tuple('1.2.0'))
-        self.assertEqual(updater.APP_VERSION, '1.2.11')
+        self.assertEqual(updater.APP_VERSION, '1.2.13')
 
     def test_update_script_logs_failures_and_restores_previous_install(self):
         install_dir = Path('C:/Users/test/App/TabbyDesktop')
@@ -29,6 +29,9 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertIn('update.log', script)
         self.assertIn('start "" "%EXE%"', script)
         self.assertIn('set "APP_PID=1234"', script)
+        self.assertIn('set /a WAITED=0', script)
+        self.assertIn('if %WAITED% GEQ 120 goto failed', script)
+        self.assertIn('Application exited; replacing files.', script)
 
     def test_update_launcher_quotes_script_paths_for_cmd_with_spaces(self):
         class WindowsScriptPath:
@@ -36,12 +39,14 @@ class GitHubUpdaterTests(unittest.TestCase):
                 return Path(r'C:\Program Files\Tabby\.tabby-update\install-update.bat')
 
         with patch.object(updater.os, 'name', 'nt'), \
+             patch.dict('os.environ', {'COMSPEC': r'C:\Windows\System32\cmd.exe'}), \
              patch.object(updater.subprocess, 'Popen') as popen:
             updater.launch_update_script(WindowsScriptPath())
 
         command = popen.call_args.args[0]
-        self.assertIn('/d /s /c', command)
-        self.assertIn('""C:\\Program Files\\Tabby\\.tabby-update\\install-update.bat""', command)
+        self.assertEqual(command[:4], [r'C:\Windows\System32\cmd.exe', '/d', '/s', '/c'])
+        self.assertEqual(command[4], r'call "C:\Program Files\Tabby\.tabby-update\install-update.bat"')
+        self.assertIsInstance(command, list)
 
     def test_latest_release_identifies_newer_version_and_windows_asset(self):
         response = {
