@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -18,7 +18,8 @@ from PySide6.QtGui import QImage
 from desktop import DesktopWindow, shop
 from credential_vault import CredentialVault
 from game_client.wss_tester import (ITEM_NAMES_ZH, QUALITY_NAMES_ZH,
-                                    equipment_attribute_lines, localized_item_name, quality_color)
+                                    character_creation_payload, equipment_attribute_lines,
+                                    localized_item_name, profile_needs_character_creation, quality_color)
 from game_client.minimap import peer_map_position
 
 
@@ -51,10 +52,10 @@ class DesktopTests(unittest.TestCase):
             write.assert_not_called()
         self.assertFalse(shop.MONITOR.enabled)
         self.assertFalse(shop.MONITOR.auto_buy_enabled)
-        self.assertEqual(self.window.tabs.count(), 2)
+        self.assertEqual(self.window.tabs.count(), 3)
         self.assertFalse(self.window.windowIcon().isNull())
         self.assertTrue(self.window.update_button.text().startswith('检查更新'))
-        self.assertTrue(self.window.game_nav.isChecked())
+        self.assertTrue(self.window.account_nav.isChecked())
         self.assertTrue(self.window.game.dashboard_header.isHidden())
         self.window.game.set_state('已连接')
         self.assertIn('已连接', self.window.account_status.text())
@@ -108,6 +109,78 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(shop.read_token(), '')
         warning.assert_not_called()
         information.assert_called_once()
+
+    def test_character_creation_only_uses_explicit_server_flag(self):
+        self.assertTrue(profile_needs_character_creation({'characterCreated': False}))
+        self.assertFalse(profile_needs_character_creation({'playerName': '已有角色'}))
+        self.assertFalse(profile_needs_character_creation({'characterCreated': True}))
+        self.assertFalse(profile_needs_character_creation(None))
+        self.assertEqual(character_creation_payload(' 新角色_7 ', 'WARRIOR'),
+                         {'name': '新角色_7', 'characterClass': 'WARRIOR'})
+        self.assertEqual(character_creation_payload('Guard2', 'GUARD')['characterClass'], 'GUARD')
+        for name, character_class in [('x', 'WARRIOR'), ('a name', 'WARRIOR'),
+                                      ('valid', 'MAGE')]:
+            with self.subTest(name=name, character_class=character_class):
+                with self.assertRaises(ValueError):
+                    character_creation_payload(name, character_class)
+
+    def test_uncreated_character_shows_creation_action_without_prompting_background_account(self):
+        game = self.window.game
+        game.can_prompt_character_creation = lambda: False
+        game.accept_profile_data({
+            'player': {'characterCreated': False},
+            'equipment': {},
+            'progression': {},
+        })
+        self.assertTrue(game.character_creation_required)
+        self.assertFalse(game.create_character_button.isHidden())
+        self.assertFalse(game.character_creation_prompted)
+
+    def test_character_creation_posts_published_endpoint_payload(self):
+        received = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received['path'] = self.path
+                received['authorization'] = self.headers.get('Authorization')
+                length = int(self.headers.get('Content-Length', '0'))
+                received['body'] = json.loads(self.rfile.read(length))
+                payload = json.dumps({'playerName': received['body']['name'],
+                                      'characterClass': received['body']['characterClass'],
+                                      'characterCreated': True}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        game = self.window.game
+        game.get_session_token = lambda: 'test-session'
+        game.url.setText(f'ws://127.0.0.1:{server.server_port}/api/realtime')
+        loop = QEventLoop()
+        game.bridge.profile.connect(
+            lambda payload: loop.quit() if isinstance(payload, dict)
+            and ('characterCreationResult' in payload or 'characterCreationError' in payload) else None)
+        try:
+            game.submit_character_creation({'name': 'NewHero', 'characterClass': 'GUARD'})
+            QTimer.singleShot(3000, loop.quit)
+            loop.exec()
+            self.assertEqual(received['path'], '/api/player/character')
+            self.assertEqual(received['authorization'], 'Bearer test-session')
+            self.assertEqual(received['body'], {'name': 'NewHero', 'characterClass': 'GUARD'})
+            game.accept_profile_data({'characterCreationResult': {
+                'playerName': 'NewHero', 'characterClass': 'GUARD', 'characterCreated': True,
+            }})
+            self.assertFalse(game.character_creation_required)
+            self.assertTrue(game.create_character_button.isHidden())
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_unprefixed_hex_token_requires_explicit_confirmation(self):
         with patch.object(QMessageBox, 'warning',
@@ -189,7 +262,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_embedded_shop_receives_shared_token(self):
         self.window.account_token.setText('test-embedded-session')
-        self.window.tabs.setCurrentIndex(1)
+        self.window.tabs.setCurrentIndex(2)
         self.assertTrue(self.window.shop_nav.isChecked())
         loop = QEventLoop()
         QTimer.singleShot(10000, loop.quit)
@@ -261,7 +334,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(game.stop_move_button.objectName(), 'quietButton')
         account_button = next(button for button in self.window.findChildren(QPushButton)
                               if button.text() == '账号连接')
-        self.assertEqual(account_button.objectName(), 'secondaryButton')
+        self.assertEqual(account_button.objectName(), 'quietButton')
 
         game = self.window.game
         game.current_map = 4
@@ -292,6 +365,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(game.social_inventory_table.item(0, 0).text(), '新手鞋')
 
     def test_dashboard_labels_wait_for_real_profile_without_duplicate_placeholder(self):
+        self.window.tabs.setCurrentIndex(1)
         game = self.window.game
         game.api_profile = {}
         game.last_self_state = {}
@@ -326,8 +400,10 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('#e05e5a', self.window.connection_dot.styleSheet())
 
     def test_monster_empty_state_starts_at_top_and_replaces_empty_table(self):
+        self.window.tabs.setCurrentIndex(1)
         game = self.window.game
-        tabs = next(tab for tab in self.window.findChildren(QTabWidget) if tab.count() == 5)
+        tabs = next(tab for tab in self.window.findChildren(QTabWidget)
+                    if [tab.tabText(i) for i in range(tab.count())][:2] == ["任务", "怪物"])
         tabs.setCurrentIndex(1)
         game.current_map = 1
         game.monsters = {}
@@ -392,6 +468,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(localized_item_name({'nameEn': 'Unmapped Blade', 'slotType': 'WEAPON'}), '未收录武器')
 
     def test_compact_dashboard_exposes_potion_toggle_and_combat_feed(self):
+        self.window.tabs.setCurrentIndex(1)
         game = self.window.game
         self.assertTrue(game.auto_potion.isVisible())
         self.assertTrue(game.combat_status.isVisible())
@@ -642,6 +719,23 @@ class DesktopTests(unittest.TestCase):
         game.request_social_api = lambda *args: calls.append(args)
         game.equip_item_from_comparison(game.api_equipment['items'][1], compare_dialog)
         self.assertEqual(calls[-1], ('equip', '/equipment/equip', 'POST', {'playerItemId': 42}))
+
+    def test_backpack_selection_and_dialog_fit_windows_screens(self):
+        game = self.window.game
+        game.api_equipment = {'items': [
+            {'playerItemId': 51, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON',
+             'qualityCode': 'L2', 'attack': 6, 'equipped': False},
+        ]}
+        game.refresh_profile_data = lambda **kwargs: None
+        game.open_backpack()
+        self.app.processEvents()
+        style = game.backpack_table.styleSheet()
+        self.assertIn('QTableWidget::item:selected', style)
+        self.assertIn('#FFFFFF', style)
+        self.assertGreaterEqual(game.backpack_table.rowHeight(0), 48)
+        self.assertGreaterEqual(game.backpack_dialog.width(), game.backpack_dialog.minimumWidth())
+        game.backpack_table.selectRow(0)
+        self.assertEqual(game.backpack_table.currentRow(), 0)
 
     def test_single_backpack_item_compares_against_equipped_item_and_highlights_differences(self):
         game = self.window.game

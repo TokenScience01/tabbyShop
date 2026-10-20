@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QSpinBox,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -414,6 +415,21 @@ def equipment_attribute_lines(item: dict) -> list[str]:
     return lines or ["暂无额外属性"]
 
 
+def profile_needs_character_creation(profile: object) -> bool:
+    """Only prompt when the server explicitly marks the profile as uncreated."""
+    return isinstance(profile, dict) and profile.get("characterCreated") is False
+
+
+def character_creation_payload(name: str, character_class: str) -> dict:
+    """Validate and construct the request body used by the published game client."""
+    normalized_name = str(name).strip()
+    if re.fullmatch(r"[\w]{2,12}", normalized_name, flags=re.UNICODE) is None:
+        raise ValueError("角色名需为 2–12 个字母、数字或下划线")
+    if character_class not in {"WARRIOR", "GUARD"}:
+        raise ValueError("请选择有效的角色职业")
+    return {"name": normalized_name, "characterClass": character_class}
+
+
 def localized_monster_name(monster: dict) -> str:
     for key in ("nameZh", "monsterNameZh", "displayNameZh"):
         value = monster.get(key)
@@ -775,6 +791,10 @@ class MainWindow(QMainWindow):
         self.minimap_timer.start()
         self.api_profile = {}
         self.api_equipment = {}
+        self.character_creation_required = False
+        self.character_creation_prompted = False
+        self.character_creation_inflight = False
+        self.can_prompt_character_creation = lambda: True
         self.last_progress_state = {}
         self.last_self_state = {}
         self.latest_quests = []
@@ -1182,6 +1202,17 @@ class MainWindow(QMainWindow):
         layout.addLayout(columns, 1)
 
         character, box = card("角色概览")
+        title_item = box.takeAt(0)
+        character_heading = QHBoxLayout()
+        character_heading.addWidget(title_item.widget())
+        character_heading.addStretch(1)
+        self.create_character_button = QPushButton("创建角色")
+        self.create_character_button.setObjectName("primaryButton")
+        self.create_character_button.setToolTip("此钱包尚未创建游戏角色")
+        self.create_character_button.clicked.connect(self.show_character_creation_dialog)
+        self.create_character_button.hide()
+        character_heading.addWidget(self.create_character_button)
+        box.insertLayout(0, character_heading)
         self.character_card = character
         character_row = QHBoxLayout()
         portrait = QLabel()
@@ -1761,7 +1792,10 @@ class MainWindow(QMainWindow):
             QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #818B88; }
             QLineEdit#urlInput, QPlainTextEdit#messageInput, QPlainTextEdit#logView { font-family: Menlo, monospace; font-size: 12px; }
             QPlainTextEdit#logView { background: #191D1E; color: #D5DDDA; border: 1px solid #363D3C; }
-            QTableWidget { background: #1B1F20; alternate-background-color: #232829; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 8px; gridline-color: #363D3C; selection-background-color: #354735; }
+            QTableWidget { background: #1B1F20; alternate-background-color: #232829; color: #E8ECEB; border: 1px solid #444C4A; border-radius: 10px; gridline-color: #363D3C; selection-background-color: #35543C; outline: 0; }
+            QTableWidget::item { padding: 4px 7px; }
+            QTableWidget::item:selected { background: #35543C; color: #FFFFFF; border: 1px solid #8AB578; }
+            QTableWidget::item:selected:!active { background: #304637; color: #F1F5EF; border: 1px solid #6F8E68; }
             QHeaderView::section { background: #292E2D; color: #C6CFCC; border: 0; border-bottom: 1px solid #444C4A; padding: 8px; font-weight: 600; }
             QPushButton { min-height: 32px; padding: 3px 15px; border-radius: 8px; font-weight: 600; }
             QPushButton#primaryButton { background: #3C7951; color: #F4F7F4; border: 1px solid #579166; }
@@ -2496,6 +2530,9 @@ class MainWindow(QMainWindow):
         self.peer_last_seen = {}
         self.api_profile = {}
         self.api_equipment = {}
+        self.character_creation_required = False
+        self.character_creation_prompted = False
+        self.character_creation_inflight = False
         self.profile_refresh_inflight = False
         self.profile_refreshed_at = 0.0
         self.profile_refresh_queued = False
@@ -3534,6 +3571,99 @@ class MainWindow(QMainWindow):
             result["mailUnreadError"] = f"{type(exc).__name__}: {exc}"
         self.bridge.profile.emit(result)
 
+    def maybe_prompt_character_creation(self) -> None:
+        if (not self.character_creation_required or self.character_creation_prompted
+                or self.character_creation_inflight):
+            return
+        can_prompt = getattr(self, "can_prompt_character_creation", None)
+        if callable(can_prompt) and not can_prompt():
+            return
+        self.character_creation_prompted = True
+        QTimer.singleShot(0, self.show_character_creation_dialog)
+
+    def show_character_creation_dialog(self) -> None:
+        if not self.character_creation_required or self.character_creation_inflight:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("创建游戏角色")
+        dialog.setMinimumWidth(390)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        intro = QLabel("这个钱包还没有角色。创建后即可进入游戏。")
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        layout.addWidget(intro)
+        name_label = QLabel("角色名称")
+        name_input = QLineEdit()
+        name_input.setMaxLength(12)
+        name_input.setPlaceholderText("2–12 个字母、数字或下划线")
+        layout.addWidget(name_label)
+        layout.addWidget(name_input)
+        class_label = QLabel("职业")
+        class_combo = QComboBox()
+        class_combo.addItem("战士 · 攻击成长较高", "WARRIOR")
+        class_combo.addItem("守卫 · 生命与恢复较高", "GUARD")
+        layout.addWidget(class_label)
+        layout.addWidget(class_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("创建角色")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("稍后")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        name_input.setFocus()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            body = character_creation_payload(name_input.text(), class_combo.currentData())
+        except ValueError as exc:
+            QMessageBox.warning(self, "角色名称无效", str(exc))
+            self.show_character_creation_dialog()
+            return
+        self.submit_character_creation(body)
+
+    def submit_character_creation(self, body: dict) -> None:
+        token = self.get_session_token()
+        parsed = urllib.parse.urlsplit(self.url.text().strip())
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        api_path = parsed.path.rstrip("/")
+        if api_path.endswith("/realtime"):
+            api_path = api_path[:-len("/realtime")]
+        api_root = urllib.parse.urlunsplit((scheme, parsed.netloc, api_path, "", ""))
+        if not token or not parsed.netloc:
+            self.append_log("无法创建角色：请先连接有效的游戏账号。")
+            return
+        self.character_creation_inflight = True
+        self.create_character_button.setEnabled(False)
+        self.create_character_button.setText("创建中…")
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(
+                    api_root + "/player/character",
+                    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    headers={"Authorization": "Bearer " + token,
+                             "Content-Type": "application/json", "Accept": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    if response.status != 200 or not isinstance(payload, dict):
+                        raise RuntimeError("服务端返回了无法识别的创建结果")
+                self.bridge.profile.emit({"characterCreationResult": payload})
+            except urllib.error.HTTPError as exc:
+                try:
+                    payload = json.loads(exc.read().decode("utf-8", "replace"))
+                except (TypeError, ValueError):
+                    payload = {}
+                detail = payload.get("error") or payload.get("message") or payload.get("code")
+                self.bridge.profile.emit({"characterCreationError": str(detail or f"HTTP {exc.code}")})
+            except Exception as exc:
+                self.bridge.profile.emit({"characterCreationError": str(exc)})
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def claim_encounter_reward(self, encounter_id: str) -> None:
         token = self.get_session_token()
         parsed = urllib.parse.urlsplit(self.url.text().strip())
@@ -3568,6 +3698,31 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def accept_profile_data(self, data: dict) -> None:
+        if isinstance(data, dict) and ("characterCreationResult" in data or "characterCreationError" in data):
+            self.character_creation_inflight = False
+            if "characterCreationResult" in data:
+                created = data.get("characterCreationResult")
+                created = created.get("player", created) if isinstance(created, dict) else {}
+                if isinstance(created, dict):
+                    self.api_profile.update(created)
+                self.character_creation_required = False
+                self.create_character_button.hide()
+                self.create_character_button.setEnabled(True)
+                self.create_character_button.setText("创建角色")
+                self.append_log("角色创建成功，角色资料已更新。")
+                self.refresh_character_status()
+                self.update_social_inventory()
+                metadata_callback = getattr(self, "on_account_metadata_change", None)
+                if metadata_callback:
+                    metadata_callback()
+            else:
+                detail = str(data.get("characterCreationError") or "请稍后重试")
+                self.create_character_button.setEnabled(True)
+                self.create_character_button.setText("重试创建")
+                self.create_character_button.setToolTip(detail)
+                self.append_log("创建角色失败：" + detail)
+                QMessageBox.warning(self, "创建角色失败", detail)
+            return
         if isinstance(data, dict) and data.get("socialApiKey"):
             key = str(data["socialApiKey"])
             if data.get("socialApiError"):
@@ -3628,6 +3783,16 @@ class MainWindow(QMainWindow):
         progression = data.get("progression", {})
         if isinstance(player, dict) and player:
             self.api_profile = player.get("player", player)
+            self.character_creation_required = profile_needs_character_creation(self.api_profile)
+            if self.character_creation_required:
+                self.create_character_button.setText("创建角色")
+                self.create_character_button.setToolTip("服务端确认这个钱包还没有游戏角色")
+                self.create_character_button.setEnabled(True)
+                self.create_character_button.show()
+                self.maybe_prompt_character_creation()
+            elif self.api_profile.get("characterCreated") is True:
+                self.create_character_button.hide()
+                self.character_creation_prompted = False
         if isinstance(equipment, dict) and equipment:
             self.notify_new_equipment(equipment)
             self.api_equipment = equipment
@@ -3639,6 +3804,9 @@ class MainWindow(QMainWindow):
                 self.update_quests(quests)
         self.refresh_character_status()
         self.update_social_inventory()
+        metadata_callback = getattr(self, "on_account_metadata_change", None)
+        if metadata_callback:
+            metadata_callback()
         if data.get("error"):
             self.append_log("角色/任务刷新未完成：" + str(data["error"]))
         if data.get("claimEncounterId"):
@@ -3836,8 +4004,18 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "backpack_dialog"):
             self.backpack_dialog = QDialog(self)
             self.backpack_dialog.setWindowTitle("背包")
-            self.backpack_dialog.resize(720, 500)
-            self.backpack_dialog.setMinimumSize(640, 440)
+            screen = self.screen() or QApplication.primaryScreen()
+            available = screen.availableGeometry() if screen else None
+            if available:
+                width = min(1080, max(420, int(available.width() * 0.86)), available.width() - 32)
+                height = min(900, max(340, int(available.height() * 0.78)), available.height() - 32)
+                minimum_width = max(320, min(620, available.width() - 32))
+                minimum_height = max(260, min(440, available.height() - 32))
+                self.backpack_dialog.resize(width, height)
+                self.backpack_dialog.setMinimumSize(minimum_width, minimum_height)
+            else:
+                self.backpack_dialog.resize(900, 640)
+                self.backpack_dialog.setMinimumSize(620, 440)
             layout = QVBoxLayout(self.backpack_dialog)
             heading = QHBoxLayout()
             self.backpack_status = QLabel("等待数据")
@@ -3854,7 +4032,10 @@ class MainWindow(QMainWindow):
             self.backpack_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.backpack_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.backpack_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            self.backpack_table.setAlternatingRowColors(True)
+            self.backpack_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.backpack_table.setToolTip("按住 Ctrl（macOS 上按 ⌘）可多选；只能比较同一部位的装备。")
+            self.backpack_table.setStyleSheet("QTableWidget::item:selected { background:#35543C; color:#FFFFFF; border:1px solid #8AB578; } QTableWidget::item:selected:!active { background:#304637; color:#F1F5EF; border:1px solid #6F8E68; }")
             self.backpack_table.itemSelectionChanged.connect(self.update_backpack_action)
             self.backpack_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             self.backpack_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
@@ -3879,6 +4060,7 @@ class MainWindow(QMainWindow):
             actions.addWidget(self.backpack_sell_button)
             layout.addLayout(actions)
         self.update_backpack()
+        self.backpack_table.scrollToTop()
         self.backpack_dialog.show()
         self.backpack_dialog.raise_()
         self.refresh_profile_data(force=True)
