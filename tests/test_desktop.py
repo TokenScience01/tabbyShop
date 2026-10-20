@@ -60,6 +60,21 @@ class DesktopTests(unittest.TestCase):
         self.window.game.set_state('已连接')
         self.assertIn('已连接', self.window.account_status.text())
 
+    def test_vault_passphrase_is_cached_globally_and_kept_after_login_failure(self):
+        phrase = 'shared-vault-passphrase'
+        self.window.cache_shared_passphrase(phrase)
+        game = self.window.game
+        self.assertEqual(game._vault_passphrase, phrase)
+        with patch.object(QMessageBox, 'warning'):
+            game.finish_signed_login({
+                'ok': False,
+                'error': 'RuntimeError: /membership/challenge: try_again',
+            })
+        self.app.processEvents()
+        self.assertEqual(self.window._master_passphrase, phrase)
+        self.assertEqual(game._vault_passphrase, phrase)
+        self.assertIn('try_again', self.window.account_keyring_status.text())
+
     def test_private_key_session_is_shared_with_shop_in_memory(self):
         self.window.game.auth_method.setCurrentIndex(
             self.window.game.auth_method.findData('private_key'))

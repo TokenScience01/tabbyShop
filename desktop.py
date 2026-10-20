@@ -225,6 +225,7 @@ class DesktopWindow(QMainWindow):
         self.game.on_latency_change = lambda game=self.game: self.on_game_latency(game)
         self.game.on_account_metadata_change = lambda game=self.game: self.on_game_metadata(game)
         self.game.can_prompt_character_creation = lambda game=self.game: self.game is game
+        self.game.on_vault_unlocked = self.cache_shared_passphrase
         self.game.token.textChanged.connect(self.set_token)
         # Private-key login obtains a short-lived game session without ever
         # populating the manual Token field. Share that in-memory session with
@@ -537,6 +538,15 @@ class DesktopWindow(QMainWindow):
                 return None
         return phrase
 
+    def cache_shared_passphrase(self, phrase):
+        """Keep the verified vault password in memory for this app session."""
+        if not phrase:
+            return
+        self._master_passphrase = phrase
+        sessions = [self.game, *self._game_sessions.values()]
+        for game in {id(item): item for item in sessions}.values():
+            game._vault_passphrase = phrase
+
     def import_wallets(self):
         dialog = QDialog(self)
         dialog.setWindowTitle('导入多个钱包')
@@ -655,6 +665,7 @@ class DesktopWindow(QMainWindow):
                 game.on_latency_change = lambda instance=game: self.on_game_latency(instance)
                 game.on_account_metadata_change = lambda instance=game: self.on_game_metadata(instance)
                 game.can_prompt_character_creation = lambda instance=game: self.game is instance
+                game.on_vault_unlocked = self.cache_shared_passphrase
                 game.token.textChanged.connect(lambda value, instance=game: self.on_session_token_changed(instance, value))
                 game.bridge.signed_login.connect(self.on_signed_login)
                 game.bridge.keyring_status.connect(
@@ -1073,6 +1084,8 @@ class DesktopWindow(QMainWindow):
             self.web.stop()
         for game in sessions:
             game.close()
+            game._vault_passphrase = None
+        self._master_passphrase = None
         event.accept()
 
 

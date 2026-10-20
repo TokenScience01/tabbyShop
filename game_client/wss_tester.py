@@ -795,6 +795,7 @@ class MainWindow(QMainWindow):
         self.character_creation_prompted = False
         self.character_creation_inflight = False
         self.can_prompt_character_creation = lambda: True
+        self.on_vault_unlocked = lambda _passphrase: None
         self.last_progress_state = {}
         self.last_self_state = {}
         self.latest_quests = []
@@ -2154,6 +2155,8 @@ class MainWindow(QMainWindow):
                     return
             try:
                 private_key = self.credential_vault.load_wallet(vault_passphrase, selected_wallet_address)
+                self._vault_passphrase = vault_passphrase
+                self.on_vault_unlocked(vault_passphrase)
                 self.bridge.keyring_status.emit(f"主密码验证成功；已解锁 {selected_wallet_address[:8]}…{selected_wallet_address[-6:]}。")
             except (OSError, ValueError) as exc:
                 self._vault_passphrase = None
@@ -2193,6 +2196,7 @@ class MainWindow(QMainWindow):
                 if vault_passphrase is None:
                     return
             self._vault_passphrase = vault_passphrase
+            self.on_vault_unlocked(vault_passphrase)
         else:
             self._vault_passphrase = None
         self.private_key.clear()
@@ -2376,9 +2380,8 @@ class MainWindow(QMainWindow):
     def finish_signed_login(self, result: dict) -> None:
         self.connect_button.setEnabled(True)
         if not isinstance(result, dict) or not result.get("ok"):
-            self._vault_passphrase = None
-            self.bridge.keyring_status.emit("登录未完成；本次私钥不会写入加密分片。")
             error = result.get("error", "签名登录失败") if isinstance(result, dict) else "签名登录失败"
+            self.bridge.keyring_status.emit("登录失败：" + str(error)[:180])
             self.bridge.state.emit("签名登录失败")
             self.append_log("签名登录失败：" + str(error))
             was_auto_reconnect = self._auto_reconnect_login
