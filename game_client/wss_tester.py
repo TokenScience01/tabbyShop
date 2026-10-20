@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from town_navigation import find_map_path, find_town_path
 from minimap import TacticalMap
@@ -56,6 +57,43 @@ from PySide6.QtWidgets import (
 
 class WsError(Exception):
     pass
+
+
+def challenge_retry_delay(payload: dict | None, attempt: int,
+                          retry_after_header: str | None = None) -> float:
+    """Return a bounded delay for a safe retry of the idempotent login challenge."""
+    candidates = []
+    if retry_after_header:
+        candidates.append((retry_after_header, False))
+    if isinstance(payload, dict):
+        for key in ("retryAfterMs", "retry_after_ms"):
+            if payload.get(key) is not None:
+                candidates.append((payload[key], True))
+        for key in ("retryAfter", "retry_after", "retryAfterSeconds"):
+            if payload.get(key) is not None:
+                candidates.append((payload[key], False))
+
+    delay = None
+    for value, milliseconds in candidates:
+        try:
+            delay = float(value) / (1000.0 if milliseconds else 1.0)
+            break
+        except (TypeError, ValueError):
+            if milliseconds:
+                continue
+            try:
+                retry_at = parsedate_to_datetime(str(value))
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                break
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+    # Exponential backoff is used only when the API did not specify a delay.
+    if delay is None:
+        delay = min(2 ** max(0, int(attempt)), 8)
+    return min(max(delay, 0.5), 15.0)
 
 
 class MiniWebSocket:
@@ -2161,20 +2199,42 @@ class MainWindow(QMainWindow):
                         headers["Authorization"] = "Bearer " + bearer
                     request_body = json.dumps(body).encode("utf-8")
                     result = None
-                    for attempt in range(3):
+                    max_challenge_attempts = 5
+                    for attempt in range(max_challenge_attempts):
                         req = urllib.request.Request(api_base + path, data=request_body,
                                                      headers=headers, method="POST")
                         try:
                             with urllib.request.urlopen(req, timeout=15) as response:
                                 result = json.loads(response.read().decode("utf-8"))
+                            # The challenge endpoint can return this transient
+                            # application-level code with HTTP 200. It means no
+                            # challenge was issued yet, so retrying this request
+                            # is safe (unlike replaying verify or enter).
+                            if (path == "/membership/challenge" and isinstance(result, dict)
+                                    and str(result.get("code", "")).lower() == "try_again"):
+                                if attempt + 1 < max_challenge_attempts:
+                                    delay = challenge_retry_delay(
+                                        result, attempt, response.headers.get("Retry-After"))
+                                    self.bridge.state.emit(
+                                        f"签名服务器正准备登录挑战，{delay:g} 秒后自动重试（{attempt + 1}/"
+                                        f"{max_challenge_attempts - 1}）…")
+                                    time.sleep(delay)
+                                    continue
+                                raise RuntimeError(
+                                    "服务器连续多次暂时无法生成签名挑战（try_again）；请等待片刻后重新连接。")
                             break
                         except urllib.error.HTTPError as exc:
                             # A challenge is safe to request again. Avoid
                             # replaying verify/enter: a gateway may have lost
                             # its response after consuming their one-time data.
-                            if path == "/membership/challenge" and exc.code in (502, 503, 504) and attempt < 2:
+                            if (path == "/membership/challenge" and exc.code in (429, 502, 503, 504)
+                                    and attempt + 1 < max_challenge_attempts):
                                 exc.close()
-                                time.sleep(0.5 * (attempt + 1))
+                                delay = challenge_retry_delay(
+                                    None, attempt, exc.headers.get("Retry-After", ""))
+                                self.bridge.state.emit(
+                                    f"登录服务器暂不可用（HTTP {exc.code}），{delay:g} 秒后自动重试…")
+                                time.sleep(delay)
                                 continue
                             raw = exc.read().decode("utf-8", errors="replace")
                             try:
@@ -2188,6 +2248,19 @@ class MainWindow(QMainWindow):
                                     error_data = {"message": re.sub(r"\s+", " ", raw).strip()[:180]}
                             code = error_data.get("code", "") if isinstance(error_data, dict) else ""
                             message = error_data.get("message", "") if isinstance(error_data, dict) else ""
+                            if (path == "/membership/challenge" and
+                                    str(code).lower() == "try_again" and
+                                    attempt + 1 < max_challenge_attempts):
+                                delay = challenge_retry_delay(
+                                    error_data, attempt, exc.headers.get("Retry-After", ""))
+                                exc.close()
+                                self.bridge.state.emit(
+                                    f"签名服务器正准备登录挑战，{delay:g} 秒后自动重试…")
+                                time.sleep(delay)
+                                continue
+                            if path == "/membership/challenge" and str(code).lower() == "try_again":
+                                raise RuntimeError(
+                                    "服务器连续多次暂时无法生成签名挑战（try_again）；请等待片刻后重新连接。") from None
                             detail = str(code or message or f"HTTP {exc.code}")
                             raise RuntimeError(f"{path}: {detail}") from None
                     if not isinstance(result, dict):
