@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel,
                                QPushButton, QTableWidget, QTabWidget, QCheckBox, QFrame)
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QSettings, QTimer
 from PySide6.QtGui import QImage
-from desktop import DesktopWindow, shop
+from desktop import BatchMapCanvas, DesktopWindow, shop
+from wss_tester import MainWindow as DesktopGameWindow
 from credential_vault import CredentialVault
 from game_client.wss_tester import (ITEM_NAMES_ZH, QUALITY_NAMES_ZH,
                                     character_creation_payload, equipment_attribute_lines,
@@ -142,6 +143,107 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('金币 1,234.50', summary)
         self.assertIn('TABBY 6,305.93', summary)
 
+    def test_account_summary_includes_luck_when_server_provides_it(self):
+        game = type('GameSummary', (), {})()
+        game.api_profile = {'playerName': 'Hero'}
+        game.last_progress_state = {}
+        game.api_equipment = {'totals': {'luck': 12.5}}
+        game.last_self_state = {}
+        game.character_facts = {}
+        self.assertIn('幸运 12.50%', DesktopWindow.account_summary(game))
+
+    def test_character_overview_includes_server_reported_luck(self):
+        game = self.window.game
+        game.api_profile = {'playerName': 'Hero', 'characterClass': 'WARRIOR'}
+        game.last_progress_state = {'level': 8, 'experience': 20, 'experienceNeeded': 100}
+        game.last_self_state = {'health': 10, 'maxHealth': 20, 'gold': 2}
+        game.api_equipment = {'totals': {'luck': 7.5}, 'items': []}
+        game.refresh_character_status()
+        self.assertIn('幸运', game.character_facts)
+        self.assertEqual(game.character_facts['幸运'].text(), '7.5%')
+
+    def test_batch_map_window_is_a_separate_account_center_tool(self):
+        self.assertEqual(self.window.batch_map_nav.text(), '批量地图')
+        self.window.batch_map_nav.click()
+        self.window.open_batch_map()
+        self.app.processEvents()
+        self.assertTrue(self.window.batch_map_dialog.isVisible())
+        self.assertEqual(self.window.batch_map_canvas.minimumWidth(), 560)
+        self.assertGreater(self.window.batch_map_selector.count(), 1)
+        self.window.batch_map_dialog.close()
+
+    def test_batch_map_labels_monster_level_name_and_rank(self):
+        label = BatchMapCanvas.monster_map_label({
+            'monsterKey': 'skeleton', 'level': 30, 'monsterRank': 'ELITE'
+        })
+        self.assertIn('30级', label)
+        self.assertIn('精英', label)
+        self.assertNotIn('None', label)
+
+    def test_batch_manual_coordinate_move_uses_existing_path_planner(self):
+        game = self.window.game
+        class Socket:
+            def send_text(self, _text):
+                pass
+        game.ws = Socket()
+        game.world_ready = True
+        game.server_dead = False
+        game.respawn_pending = False
+        game.current_map = 1
+        game.world_x, game.world_y = 100.0, 100.0
+        game.movement_revision = 1
+        try:
+            with patch('wss_tester.find_map_path', return_value=[(120.0, 130.0)]) as find_path:
+                self.assertTrue(game.move_to_coordinate(120, 130))
+            find_path.assert_called_once_with(1, (100.0, 100.0), (120.0, 130.0))
+            self.assertTrue(game.manual_move_active)
+            self.assertEqual(game.route_points, [(120.0, 130.0)])
+        finally:
+            game.move_timer.stop()
+            game.manual_move_active = False
+            game.route_points.clear()
+            game.ws = None
+
+    def test_batch_map_move_dispatches_to_selected_accounts_on_other_maps_too(self):
+        self.window.open_batch_map()
+        self.app.processEvents()
+        map_id = int(self.window.batch_map_selector.currentData())
+        class Session:
+            def __init__(self, address, current_map):
+                self._desktop_wallet_address = address
+                self.current_map = current_map
+                self.manual_map_target = None
+                self.calls = []
+            def move_to_coordinate(self, x, y):
+                self.calls.append(('move', x, y))
+                return True
+            def start_manual_map_travel(self, destination, coordinate_target=None):
+                self.calls.append(('travel', destination, coordinate_target))
+                self.manual_map_target = destination
+
+        first = Session('0x' + '1' * 37 + '111', map_id)
+        second = Session('0x' + '2' * 37 + '222', 1 if map_id != 1 else 2)
+        self.window.batch_map_canvas.target = {'x': 123.0, 'y': 456.0}
+        with patch.object(self.window, 'selected_batch_map_games', return_value=[first, second]):
+            self.window.batch_map_move_selected()
+
+        self.assertEqual(first.calls, [('move', 123.0, 456.0)])
+        self.assertEqual(second.calls, [('travel', map_id, (123.0, 456.0))])
+        self.assertIn('已向 2/2 个所选账号派发移动', self.window.batch_map_status.text())
+        self.window.batch_map_dialog.close()
+
+    def test_manual_map_travel_starts_queued_coordinate_move_after_arrival(self):
+        game = self.window.game
+        game.world_ready = True
+        game.server_dead = False
+        game.respawn_pending = False
+        game.current_map = 2
+        with patch.object(game, 'move_to_coordinate', return_value=True) as move:
+            game.start_manual_map_travel(2, coordinate_target=(321.0, 654.0))
+        move.assert_called_once_with(321.0, 654.0)
+        self.assertIsNone(game.manual_map_target)
+        self.assertIsNone(game.manual_coordinate_target)
+
     def test_account_summary_shows_current_map(self):
         game = type('GameSummary', (), {})()
         game.api_profile = {'playerName': 'Hero'}
@@ -242,6 +344,31 @@ class DesktopTests(unittest.TestCase):
             self.window._finish_batch_login_result(
                 expected[3], {'ok': True, 'token': 'fourth-session'})
         self.assertIn('批量上线已发起 4 个账号', self.window.planner_status.text())
+
+    def test_background_wallets_get_distinct_game_sessions(self):
+        addresses = ['0x' + '1' * 37 + '111', '0x' + '2' * 37 + '222']
+        vault = self.window.game.credential_vault
+        with (patch.object(vault, 'list_wallets', return_value=addresses),
+              patch.object(DesktopGameWindow, 'connect_ws')):
+            self.window.connect_account(addresses[0], background=True)
+            self.window.connect_account(addresses[1], background=True)
+
+        first, second = (self.window._game_sessions[address.lower()] for address in addresses)
+        self.assertIsNot(first, second)
+        self.assertIsNot(first.bridge, second.bridge)
+
+    def test_batch_map_selection_deduplicates_aliased_game_sessions(self):
+        game = self.window.game
+        addresses = ['0x' + '1' * 37 + '111', '0x' + '2' * 37 + '222']
+        self.window._game_sessions = {address.lower(): game for address in addresses}
+        self.window.batch_map_account_checks = {}
+        for address in addresses:
+            check = QCheckBox()
+            check.setChecked(True)
+            self.window.batch_map_account_checks[address] = check
+
+        self.assertEqual(self.window.selected_batch_map_games(), [game])
+        self.assertEqual(self.window.batch_map_games(), [game])
 
     def test_batch_login_does_not_enable_combat_automatically(self):
         address = '0x' + 'a' * 37 + '111'
@@ -701,7 +828,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_rarity_colors_and_current_map_indicator(self):
         self.assertEqual([quality_color(f'L{level}') for level in range(1, 5)],
-                         ['#f2f2ef', '#69b3ff', '#c994ff', '#ffcf72'])
+                         ['#667085', '#1976B2', '#7B3FA1', '#9A6500'])
         self.assertEqual(QUALITY_NAMES_ZH['L4'], '传说')
         self.assertEqual(localized_item_name({'itemCode': 'STARTER_SHOES'}), '新手鞋')
 
@@ -735,10 +862,10 @@ class DesktopTests(unittest.TestCase):
         game.backpack_equip_button = QPushButton()
         game.backpack_compare_button = QPushButton()
         game.update_backpack()
-        self.assertEqual(game.backpack_table.item(0, 0).foreground().color().name(), '#c994ff')
+        self.assertEqual(game.backpack_table.item(0, 0).foreground().color().name(), '#7b3fa1')
         self.assertEqual(game.backpack_table.item(0, 2).text(), '史诗')
         game.update_social_inventory()
-        self.assertEqual(game.social_inventory_table.item(0, 0).foreground().color().name(), '#c994ff')
+        self.assertEqual(game.social_inventory_table.item(0, 0).foreground().color().name(), '#7b3fa1')
         self.assertEqual(game.social_inventory_table.item(0, 5).text(), '背包')
 
         game.api_equipment = {'items': [
@@ -1201,6 +1328,9 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(equipment_attribute_lines({'attributes': [
             {'code': 'ATTACK', 'value': 8}, {'code': 'LUCK', 'value': 3}
         ]}), ['攻击 +8', '幸运 +3%'])
+        self.assertEqual(equipment_attribute_lines({
+            'attributes': [{'code': 'ATTACK', 'value': 8}], 'luck': 2.5
+        }), ['攻击 +8', '幸运 +2.5%'])
 
     def test_mode_and_chat_use_live_realtime_actions(self):
         game = self.window.game

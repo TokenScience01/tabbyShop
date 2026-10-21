@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 import tempfile
@@ -18,17 +20,19 @@ os.environ['TABBY_SAFE_START'] = '1'
 BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 sys.path.insert(0, str(BASE_DIR / 'game_client'))
 
-from PySide6.QtCore import QUrl, Qt, QObject, Signal, Slot, QFile, QTimer
+from PySide6.QtCore import QUrl, Qt, QObject, Signal, Slot, QFile, QTimer, QPointF, QRectF
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QGridLayout, QLabel, QPushButton,
                               QStackedWidget, QButtonGroup, QDialog, QMessageBox,
                               QFrame, QPlainTextEdit, QInputDialog, QLineEdit,
                               QScrollArea, QCheckBox, QComboBox, QSpinBox, QSizePolicy)
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter, QColor, QPen, QPainterPath
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 from PySide6.QtWebChannel import QWebChannel
-from wss_tester import MAP_NAMES, MainWindow as GameWindow
+from wss_tester import (MAP_NAMES, MAP_ROUTES, PORTAL_CENTERS,
+                        localized_monster_name, MainWindow as GameWindow)
+from game_client.minimap import peer_map_position
 import server as shop
 
 
@@ -42,6 +46,408 @@ class DesktopClipboard(QObject):
     @Slot(str)
     def copyText(self, text):
         QApplication.clipboard().setText(text)
+
+
+class BatchMapCanvas(QWidget):
+    """Large shared map for dispatching connected game sessions."""
+
+    def __init__(self, get_games, map_id=2, parent=None):
+        super().__init__(parent)
+        self.get_games = get_games
+        self.map_id = map_id
+        self.target = None
+        self.terrain = {}
+        self.zoom = 1.0
+        self.view_center = None
+        self._drag_pos = None
+        self.animation_phase = 0.0
+        self.monster_icon = QPixmap(str(BASE_DIR / 'game_client' / 'assets' / 'monster.webp'))
+        self.setMinimumSize(560, 430)
+        self.setMouseTracking(True)
+        for key, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json')):
+            try:
+                payload = json.loads((BASE_DIR / 'game_client' / filename).read_text())
+                cells = payload.get('cells', [])
+                if cells:
+                    self.terrain[key] = cells
+            except (OSError, ValueError):
+                pass
+
+    def set_map(self, map_id):
+        self.map_id = int(map_id)
+        self.zoom = 1.0
+        self.view_center = None
+        self.update()
+
+    def _bounds(self):
+        cells = self.terrain.get(self.map_id, [])
+        if cells:
+            xs, ys = zip(*cells)
+            return QRectF(min(xs) * 64, min(ys) * 64,
+                          (max(xs) - min(xs) + 1) * 64, (max(ys) - min(ys) + 1) * 64)
+        points = [coord for (source, _destination), coord in PORTAL_CENTERS.items()
+                  if source == self.map_id]
+        for game in self.get_games():
+            if getattr(game, 'current_map', None) == self.map_id:
+                if game.world_x is not None and game.world_y is not None:
+                    points.append((float(game.world_x), float(game.world_y)))
+                for monster in getattr(game, 'monsters', {}).values():
+                    if monster.get('x') is not None and monster.get('y') is not None:
+                        points.append((float(monster['x']), float(monster['y'])))
+        # Maps without recovered navigation data still use the game's common
+        # 0–7680 world coordinate space; include live markers if they fall
+        # outside it, without collapsing the view around a single portal.
+        bounds = QRectF(0, 0, 7680, 7680)
+        for x, y in points:
+            bounds = bounds.united(QRectF(x - 350, y - 300, 700, 600))
+        return bounds
+
+    def _transform(self):
+        bounds = self._bounds()
+        pad = 18
+        scale = min((self.width() - 2 * pad) / max(1, bounds.width()),
+                    (self.height() - 2 * pad) / max(1, bounds.height()))
+        scale *= self.zoom
+        center = self.view_center or bounds.center()
+        dx = self.width() / 2 - (center.x() - bounds.left()) * scale
+        dy = self.height() / 2 - (center.y() - bounds.top()) * scale
+        def point(x, y):
+            return QPointF(dx + (x - bounds.left()) * scale,
+                           dy + (y - bounds.top()) * scale)
+        def world(pos):
+            return (bounds.left() + (pos.x() - dx) / scale,
+                    bounds.top() + (pos.y() - dy) / scale)
+        return bounds, scale, point, world
+
+    def wheelEvent(self, event):
+        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        _, _, _, world = self._transform()
+        anchor_x, anchor_y = world(event.position())
+        self.zoom = min(5.0, max(0.65, self.zoom * factor))
+        _, scale, _, _ = self._transform()
+        offset = event.position() - QPointF(self.width() / 2, self.height() / 2)
+        self.view_center = QPointF(anchor_x - offset.x() / scale,
+                                   anchor_y - offset.y() / scale)
+        self.update()
+        event.accept()
+
+    @staticmethod
+    def monster_map_label(monster):
+        rank = str(monster.get('monsterRank', '')).upper()
+        rank_label = {'ELITE': '精英', 'BOSS': '首领', 'NORMAL': '普通'}.get(rank, '怪物')
+        level = next((monster.get(key) for key in ('level', 'monsterLevel', 'requiredLevel', 'lv')
+                      if monster.get(key) is not None), None)
+        level_text = f'{level}级 ' if level is not None else ''
+        name = localized_monster_name(monster)
+        rank_text = '' if rank_label in name else f' · {rank_label}'
+        return f'{level_text}{name}{rank_text}'
+
+    def draw_badge(self, painter, x, y, text, foreground, background, border,
+                   occupied=None, placement='above'):
+        metrics = painter.fontMetrics()
+        width = metrics.horizontalAdvance(text) + 12
+        height = max(18, metrics.height() + 6)
+        candidates = {
+            'above': [QRectF(x - width / 2, y - height - 11, width, height),
+                      QRectF(x - width / 2, y - height * 2 - 15, width, height),
+                      QRectF(x - width / 2, y + 11, width, height),
+                      QRectF(x + 13, y - height / 2, width, height),
+                      QRectF(x - width - 13, y - height / 2, width, height)],
+            'right': [QRectF(x + 12, y - height / 2, width, height),
+                      QRectF(x + 12, y - height - 5, width, height),
+                      QRectF(x - width - 12, y - height / 2, width, height),
+                      QRectF(x - width / 2, y + 12, width, height),
+                      QRectF(x - width / 2, y - height - 12, width, height)],
+        }[placement]
+        occupied = occupied if occupied is not None else []
+        rect = None
+        for candidate in candidates:
+            candidate.moveLeft(min(max(2, candidate.left()), self.width() - width - 2))
+            candidate.moveTop(min(max(2, candidate.top()), self.height() - height - 22))
+            if not any(candidate.adjusted(-2, -2, 2, 2).intersects(previous) for previous in occupied):
+                rect = candidate
+                break
+        if rect is None:
+            rect = candidates[0]
+            rect.moveLeft(min(max(2, rect.left()), self.width() - width - 2))
+            rect.moveTop(min(max(2, rect.top()), self.height() - height - 22))
+        occupied.append(rect.adjusted(-2, -2, 2, 2))
+        painter.setPen(QPen(QColor(border), 1))
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(rect, 6, 6)
+        painter.setPen(QColor(foreground))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        return rect
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None:
+            delta = event.position() - self._drag_pos
+            _, scale, _, _ = self._transform()
+            center = self.view_center or self._bounds().center()
+            self.view_center = QPointF(center.x() - delta.x() / scale,
+                                       center.y() - delta.y() / scale)
+            self._drag_pos = event.position()
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._drag_pos = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._drag_pos = event.position()
+            event.accept()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        _, _, point, world = self._transform()
+        games = self.get_games()
+        best = None
+        best_distance = 20.0
+        for game in games:
+            if getattr(game, 'current_map', None) != self.map_id:
+                continue
+            for encounter_id, monster in getattr(game, 'monsters', {}).items():
+                if monster.get('x') is None or monster.get('y') is None or int(monster.get('health', 1) or 0) <= 0:
+                    continue
+                screen = point(float(monster['x']), float(monster['y']))
+                distance = ((screen.x() - event.position().x()) ** 2 +
+                            (screen.y() - event.position().y()) ** 2) ** 0.5
+                if distance < best_distance:
+                    best_distance = distance
+                    best = {'x': float(monster['x']), 'y': float(monster['y']),
+                            'encounterId': str(encounter_id),
+                            'elite': str(monster.get('monsterRank', '')).upper() == 'ELITE',
+                            'name': str(monster.get('name') or monster.get('monsterName') or '怪物')}
+        if best is None:
+            x, y = world(event.position())
+            self.target = {'x': x, 'y': y, 'encounterId': None, 'elite': False, 'name': '坐标点'}
+        else:
+            self.target = best
+        self.update()
+        self.targetChanged.emit(self.target)
+
+    targetChanged = Signal(object)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor('#F5F1E7'))
+        bounds, scale, point, _ = self._transform()
+        cells = self.terrain.get(self.map_id, [])
+        # Snowfield's recovered navigation data is a complete 120×120 walkable
+        # grid. Drawing every tile makes the map look like graph paper, so use
+        # a calm field with a sparse tactical grid there. Town keeps its
+        # irregular walkable-cell silhouette.
+        if cells and self.map_id == 1:
+            p.setPen(QPen(QColor('#E0D9C9'), 0.7))
+            p.setBrush(QColor('#E9E5D8'))
+            for x, y in cells:
+                top = point(x * 64, y * 64)
+                p.drawRect(QRectF(top.x(), top.y(), max(1, 64 * scale), max(1, 64 * scale)))
+        elif cells:
+            top_left = point(bounds.left(), bounds.top())
+            bottom_right = point(bounds.right(), bounds.bottom())
+            map_frame = QRectF(top_left, bottom_right)
+            p.fillRect(map_frame, QColor('#EDF0E4'))
+            p.save()
+            p.setClipRect(map_frame)
+            p.setPen(QPen(QColor('#D7DDCE'), 1))
+            step = 512 * scale
+            start_x = (self.width() / 2) % step
+            while start_x < self.width():
+                p.drawLine(round(start_x), 18, round(start_x), self.height() - 18)
+                start_x += step
+            start_y = (self.height() / 2) % step
+            while start_y < self.height():
+                p.drawLine(18, round(start_y), self.width() - 18, round(start_y))
+                start_y += step
+            p.restore()
+            p.setPen(QPen(QColor('#C7CEBC'), 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(top_left, bottom_right), 12, 12)
+        for (source, destination), coord in PORTAL_CENTERS.items():
+            if source != self.map_id:
+                continue
+            pos = point(*coord)
+            p.setPen(QPen(QColor('#A77933'), 2))
+            p.setBrush(QColor('#FFF9EC'))
+            p.drawRoundedRect(QRectF(pos.x() - 6, pos.y() - 6, 12, 12), 3, 3)
+            p.setPen(QColor('#72552D'))
+            p.drawText(pos + QPointF(8, -6), f'入口 {destination}')
+        games = [game for game in self.get_games()
+                 if getattr(game, 'current_map', None) == self.map_id]
+        occupied_labels = [QRectF(8, 6, 280, 38)]
+        seen_monsters = set()
+        monster_count = 0
+        for game in games:
+            for encounter_id, monster in getattr(game, 'monsters', {}).items():
+                if (int(monster.get('mapId', self.map_id) or self.map_id) != self.map_id
+                        or encounter_id in seen_monsters or monster.get('x') is None or monster.get('y') is None
+                        or int(monster.get('health', 1) or 0) <= 0):
+                    continue
+                seen_monsters.add(encounter_id)
+                monster_count += 1
+                pos = point(float(monster['x']), float(monster['y']))
+                rank = str(monster.get('monsterRank', '')).upper()
+                elite = rank == 'ELITE'
+                boss = rank == 'BOSS'
+                marker = '#9B4E56' if boss else '#B66A35' if elite else '#B66A70'
+                fill = '#E9A2A1' if boss else '#E7A45A' if elite else '#D68A8D'
+                radius = 8 if elite or boss else 4.5
+                p.setPen(QPen(QColor(marker), 2.2 if elite or boss else 1.2))
+                p.setBrush(QColor('#FFFDF7'))
+                p.drawEllipse(pos, radius + 2, radius + 2)
+                if not self.monster_icon.isNull():
+                    p.drawPixmap(QRectF(pos.x() - radius, pos.y() - radius,
+                                        radius * 2, radius * 2), self.monster_icon,
+                                 QRectF(self.monster_icon.rect()))
+                else:
+                    p.setPen(QPen(QColor(marker), 1.4))
+                    p.setBrush(QColor(fill))
+                    p.drawEllipse(pos, radius, radius)
+                label = self.monster_map_label(monster)
+                colors = (('#6B3036', '#FCE6E1', '#B95E57') if boss else
+                          ('#654817', '#FFF1CF', '#D4A339') if elite else
+                          ('#613D42', '#FFF1F0', '#E1B7B4'))
+                self.draw_badge(p, pos.x(), pos.y() - radius,
+                                label, *colors, occupied=occupied_labels)
+
+        local_player_ids = {str(getattr(game, 'player_id', '')) for game in games
+                            if getattr(game, 'player_id', None) is not None}
+        seen_peers = set()
+        peer_count = 0
+        for game in games:
+            for peer in getattr(game, 'last_peers', []):
+                location = peer_map_position(peer, self.map_id)
+                if location is None or location[0] != self.map_id:
+                    continue
+                peer_id = peer.get('id', peer.get('playerId'))
+                if peer_id is not None and str(peer_id) in local_player_ids:
+                    continue
+                identity = str(peer_id) if peer_id is not None else (
+                    str(peer.get('playerName', peer.get('name', '玩家'))),
+                    round(location[1]), round(location[2]))
+                if identity in seen_peers:
+                    continue
+                seen_peers.add(identity)
+                peer_count += 1
+                pos = point(location[1], location[2])
+                p.setPen(QPen(QColor('#FFFFFF'), 1.5))
+                p.setBrush(QColor('#188A9D'))
+                p.drawEllipse(pos, 6.5, 6.5)
+                p.setPen(QPen(QColor('#116779'), 1.2))
+                p.setBrush(QColor('#55C5D0'))
+                p.drawEllipse(pos, 4.5, 4.5)
+                name = str(peer.get('playerName', peer.get('name', '玩家'))).strip() or '玩家'
+                if len(name) > 12:
+                    name = name[:11] + '…'
+                self.draw_badge(p, pos.x(), pos.y(), name,
+                                '#145664', '#E3F6F5', '#91CFD0',
+                                occupied=occupied_labels, placement='right')
+
+        controller = self.parent()
+        if not hasattr(controller, 'batch_map_account_checks') and controller is not None:
+            controller = controller.parent()
+        selected_addresses = {address.lower() for address, check in
+                              getattr(controller, 'batch_map_account_checks', {}).items()
+                              if check.isChecked()}
+        character_count = 0
+        character_positions = []
+        for game in games:
+            if game.world_x is None or game.world_y is None:
+                continue
+            character_count += 1
+            pos = point(float(game.world_x), float(game.world_y))
+            overlap_index = sum(math.hypot(pos.x() - previous.x(), pos.y() - previous.y()) < 18
+                                for previous in character_positions)
+            character_positions.append(pos)
+            marker_pos = pos
+            if overlap_index:
+                angle = (overlap_index - 1) * (2 * math.pi / 3)
+                marker_pos = pos + QPointF(math.cos(angle) * 15, math.sin(angle) * 15)
+            address = getattr(game, '_desktop_wallet_address', '')
+            selected = address.lower() in selected_addresses if address else False
+            moving = any(getattr(game, timer_name, None) is not None and
+                         getattr(game, timer_name).isActive()
+                         for timer_name in ('move_timer', 'chase_timer', 'patrol_timer'))
+            trace = list(getattr(game, 'movement_trace', ()))
+            if moving and trace:
+                now_since_welcome = None
+                welcome_at = getattr(game, 'welcome_at', None)
+                if welcome_at is not None:
+                    now_since_welcome = time.monotonic() - welcome_at
+                trace = [sample for sample in trace
+                         if len(sample) >= 3 and sample[1] is not None and sample[2] is not None
+                         and (now_since_welcome is None or sample[0] is None
+                              or now_since_welcome - float(sample[0]) <= 8)]
+                if len(trace) > 1:
+                    trail = QPainterPath(point(float(trace[0][1]), float(trace[0][2])))
+                    for sample in trace[1:]:
+                        trail.lineTo(point(float(sample[1]), float(sample[2])))
+                    trail.lineTo(pos)
+                    p.setPen(QPen(QColor(79, 150, 94, 170), 2.2, Qt.PenStyle.DashLine))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawPath(trail)
+            route = (getattr(game, 'chase_route', None) or
+                     getattr(game, 'route_points', None) or [])
+            if moving and route:
+                next_point = point(float(route[0][0]), float(route[0][1]))
+                vx, vy = next_point.x() - pos.x(), next_point.y() - pos.y()
+                length = math.hypot(vx, vy)
+                if length > 0.1:
+                    ux, uy = vx / length, vy / length
+                    tip = QPointF(pos.x() + ux * 19, pos.y() + uy * 19)
+                    wing_a = QPointF(tip.x() - ux * 6 - uy * 4,
+                                     tip.y() - uy * 6 + ux * 4)
+                    wing_b = QPointF(tip.x() - ux * 6 + uy * 4,
+                                     tip.y() - uy * 6 - ux * 4)
+                    color = QColor('#398447' if selected else '#66766A')
+                    p.setPen(QPen(color, 2.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    p.drawLine(pos, tip)
+                    p.drawLine(tip, wing_a)
+                    p.drawLine(tip, wing_b)
+            p.setPen(QPen(QColor('#FFFFFF'), 2))
+            p.setBrush(QColor('#398447' if selected else '#829183'))
+            pulse = 2.5 * (0.5 + 0.5 * math.sin(self.animation_phase)) if moving else 0
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(57, 132, 71, 90 if selected else 45), 1.5))
+            p.drawEllipse(marker_pos, 12 + pulse, 12 + pulse)
+            p.setPen(QPen(QColor('#FFFFFF'), 2))
+            p.setBrush(QColor('#398447' if selected else '#829183'))
+            p.drawEllipse(marker_pos, 9, 9)
+            p.setPen(QPen(QColor('#285D31' if selected else '#58645A'), 1.4))
+            p.setBrush(QColor('#83D68D' if selected else '#C4CEC3'))
+            p.drawEllipse(marker_pos, 5.5, 5.5)
+            profile = getattr(game, 'api_profile', {})
+            name = (profile.get('playerName') or profile.get('name')) if isinstance(profile, dict) else None
+            name = str(name or (address[-3:] if address else getattr(game, 'player_id', '账号')))
+            label = f'{"✓ " if selected else ""}{name} · {address[-3:]}' if address else name
+            self.draw_badge(p, marker_pos.x(), marker_pos.y(), label,
+                            '#24532C' if selected else '#4B574B',
+                            '#E7F5E5' if selected else '#F1F2ED',
+                            '#78B27D' if selected else '#C7CEC3',
+                            occupied=occupied_labels, placement='right')
+        if self.target:
+            pos = point(self.target['x'], self.target['y'])
+            p.setPen(QPen(QColor('#CF6B2C'), 2.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(pos, 12, 12)
+        p.setPen(QColor('#64695F'))
+        p.drawText(12, self.height() - 10, f"{MAP_NAMES.get(self.map_id, f'地图 {self.map_id}')}  ·  缩放 {scale:.2f} px/单位")
+        counts = f'角色 {character_count}　·　附近玩家 {peer_count}　·　怪物 {monster_count}'
+        metrics = p.fontMetrics()
+        badge = QRectF(12, 10, metrics.horizontalAdvance(counts) + 20, 28)
+        p.setPen(QPen(QColor('#D8D2C4'), 1))
+        p.setBrush(QColor(255, 253, 247, 230))
+        p.drawRoundedRect(badge, 8, 8)
+        p.setPen(QColor('#464A40'))
+        p.drawText(badge, Qt.AlignmentFlag.AlignCenter, counts)
 
 
 class DesktopWalletStore:
@@ -226,6 +632,7 @@ class DesktopWindow(QMainWindow):
         self.tabs.setObjectName('appPages')
         self.account_nav = QPushButton('账号管理')
         self.game_nav = QPushButton('游戏控制台')
+        self.batch_map_nav = QPushButton('批量地图')
         self.shop_nav = QPushButton('商城与监控')
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
@@ -234,6 +641,10 @@ class DesktopWindow(QMainWindow):
             button.setCheckable(True)
             self.nav_group.addButton(button)
             nav_layout.addWidget(button)
+        self.batch_map_nav.setObjectName('shellNav')
+        self.batch_map_nav.setToolTip('打开独立大地图，统一调度多个在线账号')
+        self.batch_map_nav.clicked.connect(self.open_batch_map)
+        nav_layout.insertWidget(2, self.batch_map_nav)
         self.account_nav.setChecked(True)
         self.account_nav.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
         self.game_nav.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
@@ -524,6 +935,10 @@ class DesktopWindow(QMainWindow):
         self.planner_stop = QPushButton('停止方案')
         self.planner_stop.setObjectName('secondaryButton')
         self.planner_stop.clicked.connect(self.stop_multi_account_plan)
+        self.planner_open_map = QPushButton('大地图批量管理')
+        self.planner_open_map.setObjectName('secondaryButton')
+        self.planner_open_map.setToolTip('打开独立大地图，统一派遣在线账号进图、移动或追击精英怪。')
+        self.planner_open_map.clicked.connect(self.open_batch_map)
         self.planner_batch_disconnect = QPushButton('批量下线所选')
         self.planner_batch_disconnect.setObjectName('secondaryButton')
         self.planner_batch_disconnect.clicked.connect(self.batch_disconnect_accounts)
@@ -532,12 +947,284 @@ class DesktopWindow(QMainWindow):
         actions.addWidget(self.planner_batch_disconnect)
         actions.addWidget(self.planner_pause)
         actions.addWidget(self.planner_stop)
+        actions.addWidget(self.planner_open_map)
         actions.addStretch(1)
         self.planner_status = QLabel('选择已连接账号后，可将同一玩法配置应用到多个角色。')
         self.planner_status.setObjectName('plannerHint')
         actions.addWidget(self.planner_status, 2)
         layout.addLayout(actions)
         parent_layout.addWidget(card)
+
+    def open_batch_map(self):
+        if not hasattr(self, 'batch_map_dialog'):
+            dialog = QDialog(self)
+            dialog.setWindowTitle('批量管理 · 大地图')
+            dialog.resize(1180, 780)
+            dialog.setMinimumSize(920, 620)
+            dialog.setStyleSheet(self.game.styleSheet())
+            outer = QVBoxLayout(dialog)
+            outer.setContentsMargins(18, 16, 18, 16)
+            heading = QHBoxLayout()
+            title = QLabel('批量地图调度')
+            title.setObjectName('title')
+            heading.addWidget(title)
+            heading.addStretch(1)
+            heading.addWidget(QLabel('地图'))
+            self.batch_map_selector = QComboBox()
+            self.batch_map_selector.setObjectName('plannerMode')
+            for map_id, name in MAP_NAMES.items():
+                self.batch_map_selector.addItem(name, map_id)
+            active_map = getattr(self.game, 'current_map', None) or 2
+            index = self.batch_map_selector.findData(active_map)
+            self.batch_map_selector.setCurrentIndex(index if index >= 0 else 0)
+            heading.addWidget(self.batch_map_selector)
+            outer.addLayout(heading)
+
+            body = QHBoxLayout()
+            side = QVBoxLayout()
+            side.setSpacing(9)
+            side_title = QLabel('在线账号')
+            side_title.setObjectName('sectionTitle')
+            side.addWidget(side_title)
+            self.batch_map_select_all = QCheckBox('全选在线账号')
+            self.batch_map_select_all.toggled.connect(self.set_all_batch_map_accounts)
+            side.addWidget(self.batch_map_select_all)
+            self.batch_map_account_checks = {}
+            self.batch_map_accounts_content = QWidget()
+            self.batch_map_accounts_layout = QVBoxLayout(self.batch_map_accounts_content)
+            self.batch_map_accounts_layout.setContentsMargins(0, 0, 0, 0)
+            self.batch_map_accounts_layout.setSpacing(5)
+            account_scroll = QScrollArea()
+            account_scroll.setWidgetResizable(True)
+            account_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            account_scroll.setWidget(self.batch_map_accounts_content)
+            side.addWidget(account_scroll, 1)
+            self.batch_map_status = QLabel('点击地图标记或空白处选择目标；再让在线账号移动或追击精英。')
+            self.batch_map_status.setObjectName('subtitle')
+            self.batch_map_status.setWordWrap(True)
+            side.addWidget(self.batch_map_status)
+            body.addLayout(side, 0)
+
+            self.batch_map_canvas = BatchMapCanvas(self.batch_map_games,
+                                                   self.batch_map_selector.currentData(), dialog)
+            self.batch_map_canvas.targetChanged.connect(self.on_batch_map_target_changed)
+            self.batch_map_selector.currentIndexChanged.connect(
+                lambda *_: self.batch_map_canvas.set_map(self.batch_map_selector.currentData()))
+            body.addWidget(self.batch_map_canvas, 1)
+            outer.addLayout(body, 1)
+
+            legend = QLabel('绿点：账号　·　粉点：怪物　·　金点：精英　·　棕框：地图入口　·　点击选择目标　·　滚轮缩放 / 中键拖动')
+            legend.setObjectName('subtitle')
+            outer.addWidget(legend)
+
+            actions = QHBoxLayout()
+            self.batch_map_enter = QPushButton('让所选账号进图')
+            self.batch_map_enter.setObjectName('primaryButton')
+            self.batch_map_enter.clicked.connect(self.batch_map_enter_selected)
+            self.batch_map_move = QPushButton('移动到所选坐标')
+            self.batch_map_move.setObjectName('secondaryButton')
+            self.batch_map_move.clicked.connect(self.batch_map_move_selected)
+            self.batch_map_attack = QPushButton('追击所选位置附近精英')
+            self.batch_map_attack.setObjectName('secondaryButton')
+            self.batch_map_attack.clicked.connect(self.batch_map_attack_selected)
+            refresh = QPushButton('刷新地图')
+            refresh.setObjectName('secondaryButton')
+            refresh.clicked.connect(self.refresh_batch_map_accounts)
+            for button in (self.batch_map_enter, self.batch_map_move,
+                           self.batch_map_attack, refresh):
+                actions.addWidget(button)
+            actions.addStretch(1)
+            outer.addLayout(actions)
+            self.batch_map_dialog = dialog
+            self.batch_map_timer = QTimer(dialog)
+            self.batch_map_timer.setInterval(1200)
+            self.batch_map_timer.timeout.connect(self.refresh_batch_map_animation)
+            dialog.finished.connect(lambda *_: self.batch_map_timer.stop())
+        self.refresh_batch_map_accounts()
+        self.batch_map_timer.start()
+        self.batch_map_dialog.show()
+        self.batch_map_dialog.raise_()
+        self.batch_map_dialog.activateWindow()
+
+    def batch_map_games(self):
+        # A wallet must own its own GameWindow/WebSocket. Keep the canvas
+        # resilient to legacy aliases in the registry so one socket is never
+        # drawn twice as two different characters.
+        games = []
+        seen = set()
+        for game in self._game_sessions.values():
+            if id(game) not in seen:
+                seen.add(id(game))
+                games.append(game)
+        return games
+
+    def refresh_batch_map_animation(self):
+        games = self.batch_map_games()
+        moving = any(getattr(game, timer_name, None) is not None and
+                     getattr(game, timer_name).isActive()
+                     for game in games
+                     for timer_name in ('move_timer', 'chase_timer', 'patrol_timer'))
+        interval = 100 if moving else 1200
+        if self.batch_map_timer.interval() != interval:
+            self.batch_map_timer.setInterval(interval)
+        if moving:
+            self.batch_map_canvas.animation_phase = (self.batch_map_canvas.animation_phase + 0.55) % (2 * math.pi)
+        self.batch_map_canvas.update()
+
+    def refresh_batch_map_accounts(self):
+        if not hasattr(self, 'batch_map_accounts_layout'):
+            return
+        selected = {address: box.isChecked() for address, box in self.batch_map_account_checks.items()}
+        while self.batch_map_accounts_layout.count():
+            entry = self.batch_map_accounts_layout.takeAt(0)
+            if entry.widget():
+                entry.widget().deleteLater()
+        self.batch_map_account_checks = {}
+        seen_sessions = set()
+        for address in self.sorted_wallet_addresses(self.game.credential_vault.list_wallets()):
+            normalized = address.lower()
+            game = self._game_sessions.get(normalized)
+            duplicate_session = bool(game and id(game) in seen_sessions)
+            if game and not duplicate_session:
+                seen_sessions.add(id(game))
+            online = bool(game and not duplicate_session
+                          and game.status.text() == '已连接' and game.world_ready)
+            if duplicate_session:
+                location = '会话重复绑定，请重新登录'
+            else:
+                location = MAP_NAMES.get(game.current_map, '在线待定位') if online else '离线'
+            label = f"尾号 {address[-3:]}  ·  {location}"
+            check = QCheckBox(label)
+            check.setToolTip(address)
+            check.setEnabled(online)
+            check.setChecked(online and selected.get(address, selected.get(normalized, False)))
+            check.toggled.connect(self.update_batch_map_select_all)
+            check.toggled.connect(lambda *_: self.batch_map_canvas.update())
+            self.batch_map_account_checks[address] = check
+            self.batch_map_accounts_layout.addWidget(check)
+            if game and not duplicate_session:
+                game._desktop_wallet_address = address
+        self.batch_map_accounts_layout.addStretch(1)
+        self.update_batch_map_select_all()
+        self.batch_map_canvas.update()
+
+    def set_all_batch_map_accounts(self, checked):
+        for check in self.batch_map_account_checks.values():
+            if check.isEnabled():
+                check.setChecked(checked)
+
+    def update_batch_map_select_all(self, *_args):
+        boxes = [box for box in self.batch_map_account_checks.values() if box.isEnabled()]
+        self.batch_map_select_all.blockSignals(True)
+        self.batch_map_select_all.setChecked(bool(boxes) and all(box.isChecked() for box in boxes))
+        self.batch_map_select_all.blockSignals(False)
+
+    def selected_batch_map_games(self):
+        selected = {address.lower() for address, box in self.batch_map_account_checks.items()
+                    if box.isChecked() and box.isEnabled()}
+        games = []
+        seen = set()
+        for address, game in self._game_sessions.items():
+            if address in selected and id(game) not in seen:
+                seen.add(id(game))
+                games.append(game)
+        return games
+
+    def on_batch_map_target_changed(self, target):
+        name = target.get('name', '目标')
+        if target.get('encounterId'):
+            name += ' · 精英' if target.get('elite') else ' · 怪物'
+        self.batch_map_status.setText(
+            f"已选 {name}：({target['x']:.0f}, {target['y']:.0f})。"
+            "坐标移动仅对当前已在此地图的账号执行。")
+
+    def batch_map_enter_selected(self):
+        games = self.selected_batch_map_games()
+        if not games:
+            self.batch_map_status.setText('请先选择已在线的账号。')
+            return
+        destination = int(self.batch_map_selector.currentData())
+        routed = 0
+        for game in games:
+            if game.current_map == destination:
+                routed += 1
+                continue
+            game.start_manual_map_travel(destination)
+            if game.manual_map_target is not None or game.current_map == destination:
+                routed += 1
+        self.batch_map_status.setText(
+            f"已向 {routed}/{len(games)} 个账号发出前往 {MAP_NAMES.get(destination, destination)} 的路线指令。")
+        self.batch_map_canvas.update()
+
+    def batch_map_move_selected(self):
+        target = self.batch_map_canvas.target
+        if not target:
+            self.batch_map_status.setText('先在地图上点选一个坐标或怪物。')
+            return
+        map_id = int(self.batch_map_selector.currentData())
+        games = self.selected_batch_map_games()
+        if not games:
+            self.batch_map_status.setText('请先选择已在线的账号。')
+            return
+        accepted = []
+        skipped = []
+        coordinate = (target['x'], target['y'])
+        for game in games:
+            address = getattr(game, '_desktop_wallet_address', '')
+            label = f"尾号 {address[-3:]}" if address else '账号'
+            if game.current_map == map_id:
+                ok = game.move_to_coordinate(*coordinate)
+            else:
+                # Keep the clicked destination with this session while it travels
+                # through portals; otherwise only accounts already on this map move.
+                game.start_manual_map_travel(map_id, coordinate_target=coordinate)
+                ok = game.manual_map_target is not None or game.current_map == map_id
+            if ok:
+                accepted.append(label)
+            else:
+                reason = getattr(getattr(game, 'travel_status', None), 'text', lambda: '')()
+                skipped.append(f"{label}（{reason or '角色未就绪'}）")
+        summary = f"已向 {len(accepted)}/{len(games)} 个所选账号派发移动。"
+        if accepted:
+            summary += ' 正在移动：' + '、'.join(accepted[:4])
+            if len(accepted) > 4:
+                summary += f" 等 {len(accepted)} 个"
+        if skipped:
+            summary += '；未派发：' + '、'.join(skipped[:2])
+            if len(skipped) > 3:
+                summary += f" 等 {len(skipped)} 个"
+            summary += '（请检查角色是否已进图、是否正在复活或服务端路线是否可达）'
+        self.batch_map_status.setText(summary)
+        self.batch_map_canvas.update()
+
+    def batch_map_attack_selected(self):
+        target = self.batch_map_canvas.target
+        if not target:
+            self.batch_map_status.setText('先在地图上点选一个精英怪标记。')
+            return
+        if not target.get('encounterId') or not target.get('elite'):
+            self.batch_map_status.setText('所选位置不是精英怪标记；请点击地图上的金色精英标记。')
+            return
+        map_id = int(self.batch_map_selector.currentData())
+        games = [game for game in self.selected_batch_map_games() if game.current_map == map_id]
+        started = 0
+        for game in games:
+            candidates = [(encounter_id, monster) for encounter_id, monster in game.monsters.items()
+                          if str(monster.get('monsterRank', '')).upper() == 'ELITE'
+                          and monster.get('x') is not None and monster.get('y') is not None
+                          and int(monster.get('health', 1) or 0) > 0]
+            nearest = min(candidates,
+                          key=lambda row: ((float(row[1]['x']) - target['x']) ** 2 +
+                                           (float(row[1]['y']) - target['y']) ** 2), default=None)
+            if nearest and ((float(nearest[1]['x']) - target['x']) ** 2 +
+                            (float(nearest[1]['y']) - target['y']) ** 2) ** 0.5 <= 180:
+                game.auto_attack.setChecked(True)
+                game.start_chase(nearest[0])
+                if game.chase_target == nearest[0]:
+                    started += 1
+        self.batch_map_status.setText(
+            f"已对 {started}/{len(games)} 个同地图账号发出精英追击指令；等级范围、附近玩家保护和服务端目标校验仍会生效。")
+        self.batch_map_canvas.update()
 
     def refresh_planner_accounts(self):
         selected = {address: box.isChecked()
@@ -992,6 +1679,8 @@ class DesktopWindow(QMainWindow):
                              if source.get(key) is not None), None)
         attack = totals.get('attack', totals.get('attackPower'))
         defense = totals.get('defense')
+        luck = next((source.get(key) for source in (totals, self_state, profile, progress)
+                     for key in ('luck', 'luckPercent', 'luckValue') if source.get(key) is not None), None)
         if attack is None:
             attack = self_state.get('attack')
         if defense is None:
@@ -1016,6 +1705,8 @@ class DesktopWindow(QMainWindow):
         elif attack is not None or defense is not None:
             combat = ' / '.join(f'{label} {value}' for label, value in (('攻击', attack), ('防御', defense)) if value is not None)
             parts.append(combat)
+        if luck is not None:
+            parts.append(f'幸运 {DesktopWindow.format_summary_decimal(luck)}%')
         profession = fact_value('职业') or profile.get('characterClass') or profile.get('class')
         if profession and str(profession) != '—':
             parts.append(str(profession))
@@ -1184,7 +1875,10 @@ class DesktopWindow(QMainWindow):
             return
         game = self._game_sessions.get(normalized)
         if game is None:
-            if not self.active_address:
+            # Background batch sign-ins do not set active_address. Reusing
+            # that field to detect the first session made every background
+            # wallet after the first point at the same GameWindow and socket.
+            if not self._game_sessions:
                 game = self.game
                 widget = self.game_stack.widget(0)
             else:

@@ -285,9 +285,11 @@ SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES"
 QUALITY_NAMES_ZH = {"COMMON": "普通", "NORMAL": "普通", "UNCOMMON": "优秀", "RARE": "稀有",
                     "EPIC": "史诗", "LEGENDARY": "传说",
                     "L1": "普通", "L2": "稀有", "L3": "史诗", "L4": "传说"}
-QUALITY_COLORS = {"L1": "#f2f2ef", "L2": "#69b3ff", "L3": "#c994ff", "L4": "#ffcf72",
-                  "COMMON": "#f2f2ef", "NORMAL": "#f2f2ef", "UNCOMMON": "#69b3ff",
-                  "RARE": "#69b3ff", "EPIC": "#c994ff", "LEGENDARY": "#ffcf72"}
+# Inventory text is rendered on the light parchment UI; use dark-enough tier
+# colors to retain contrast there (the previous pale colors were unreadable).
+QUALITY_COLORS = {"L1": "#667085", "L2": "#1976B2", "L3": "#7B3FA1", "L4": "#9A6500",
+                  "COMMON": "#667085", "NORMAL": "#667085", "UNCOMMON": "#1976B2",
+                  "RARE": "#1976B2", "EPIC": "#7B3FA1", "LEGENDARY": "#9A6500"}
 QUALITY_LARK_TEMPLATES = {"L1": "green", "L2": "blue", "L3": "orange", "L4": "red"}
 QUALITY_CODE_ALIASES = {
     "COMMON": "L1", "NORMAL": "L1", "L1": "L1",
@@ -406,20 +408,22 @@ def equipment_attribute_lines(item: dict) -> list[str]:
             lines.append(f"{name} +{shown}{suffix}")
     # Some API payloads expose rolled stats only as top-level fields, or mix
     # top-level values with the rolled-attribute array.
-    if not lines:
-        for key, name, suffix in (
-            ("attack", "攻击", ""), ("defense", "防御", ""), ("maxHealth", "生命", ""),
-            ("healthRegen", "生命恢复", "/秒"), ("attackSpeedPercent", "攻击速度", "%"),
-            ("moveSpeedPercent", "移动速度", "%"), ("criticalChancePercent", "暴击率", "%"),
-            ("luck", "幸运", "%"),
-        ):
-            try:
-                value = float(item.get(key, 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if value:
-                shown = str(int(value)) if value.is_integer() else f"{value:g}"
-                lines.append(f"{name} +{shown}{suffix}")
+    shown_names = {line.split(" +", 1)[0] for line in lines}
+    for key, name, suffix in (
+        ("attack", "攻击", ""), ("defense", "防御", ""), ("maxHealth", "生命", ""),
+        ("healthRegen", "生命恢复", "/秒"), ("attackSpeedPercent", "攻击速度", "%"),
+        ("moveSpeedPercent", "移动速度", "%"), ("criticalChancePercent", "暴击率", "%"),
+        ("luck", "幸运", "%"),
+    ):
+        if name in shown_names:
+            continue
+        try:
+            value = float(item.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value:
+            shown = str(int(value)) if value.is_integer() else f"{value:g}"
+            lines.append(f"{name} +{shown}{suffix}")
     return lines or ["暂无额外属性"]
 
 
@@ -1276,7 +1280,7 @@ class MainWindow(QMainWindow):
         facts.setColumnStretch(1, 1)
         facts.setColumnStretch(3, 1)
         self.character_facts = {}
-        fact_keys = ("角色", "职业", "等级", "状态", "经验", "攻击", "防御", "金币", "移速加成")
+        fact_keys = ("角色", "职业", "等级", "状态", "经验", "攻击", "防御", "幸运", "金币", "移速加成")
         for index, key in enumerate(fact_keys):
             label = QLabel(key)
             label.setObjectName("subtitle")
@@ -1852,7 +1856,15 @@ class MainWindow(QMainWindow):
             QTableWidget::item:selected { background: #E4EBDC; color: #293C2B; border: 1px solid #AABCA2; }
             QTableWidget::item:selected:!active { background: #EEF1E9; color: #374337; border: 1px solid #C5D0BD; }
             QHeaderView::section { background: #F3EFE6; color: #555A51; border: 0; border-bottom: 1px solid #D5CEBF; padding: 8px; font-weight: 600; }
-            QPushButton { min-height: 32px; padding: 3px 15px; border-radius: 8px; font-weight: 600; }
+            QPushButton { min-height: 32px; padding: 3px 15px; border-radius: 8px; font-weight: 600;
+                          color:#514630; background:#F3EFE6; border:1px solid #CDBD9F; }
+            QPushButton:hover { background:#ECE4D4; border-color:#B99B67; }
+            QPushButton:pressed { background:#E5D9C3; border-color:#A98B5A; }
+            QDialogButtonBox QPushButton { min-width:72px; min-height:34px; padding:4px 16px; }
+            QInputDialog, QMessageBox { background:#F1EEE7; color:#292C26; }
+            QInputDialog QLabel, QMessageBox QLabel { color:#292C26; }
+            QInputDialog QLineEdit { background:#FFFFFF; color:#292C26; border:1px solid #8A9E80;
+                                     border-radius:8px; padding:8px 10px; selection-background-color:#DDE8D7; }
             QPushButton#primaryButton { background: #5B7C55; color: #FFFFFF; border: 1px solid #52734D; }
             QPushButton#primaryButton:hover { background: #496B47; border-color: #496B47; }
             QPushButton#secondaryButton { background: #F3EFE6; color: #514630; border: 1px solid #CDBD9F; }
@@ -2619,6 +2631,8 @@ class MainWindow(QMainWindow):
         self.server_dead = False
         self.respawn_pending = False
         self.return_map_target = None
+        self.manual_map_target = None
+        self.manual_coordinate_target = None
         self.quest_map_target = None
         self.quest_map_quest_id = None
         self.respawn_attempts = 0
@@ -2632,6 +2646,7 @@ class MainWindow(QMainWindow):
         self.pending_destination = None
         self.pending_portal = None
         self.route_points = []
+        self.manual_move_active = False
         self.position_estimated = False
         self.movement_trace = deque(maxlen=12)
         # Recovered client base: 105 * 1.15 * 1.15 * ACTION_SPEED_BOOST(1.2).
@@ -2746,6 +2761,7 @@ class MainWindow(QMainWindow):
         if resolved == self.current_map:
             return
         self.current_map = resolved
+        self.movement_trace.clear()
         callback = getattr(self, "on_map_change", None)
         if callable(callback):
             callback(resolved)
@@ -2939,7 +2955,9 @@ class MainWindow(QMainWindow):
                     self.position_estimated = False
                 self.travel_status.setText(f"入图被拒绝：{reason}" + (f"；{retry} 秒后可重试" if retry else ""))
             self.update_map_buttons()
-            if packet.get("ok") and self.return_map_target is not None:
+            if packet.get("ok") and self.manual_map_target is not None:
+                QTimer.singleShot(500, self.continue_manual_map_travel)
+            elif packet.get("ok") and self.return_map_target is not None:
                 QTimer.singleShot(500, self.continue_return_map)
             elif packet.get("ok") and (self.quest_map_target is not None or self.questless_farm_mode):
                 QTimer.singleShot(500, self.continue_quest_map_travel)
@@ -3686,7 +3704,8 @@ class MainWindow(QMainWindow):
         self.travel_to(route[0])
 
     def has_auto_travel_intent(self) -> bool:
-        return (self.return_map_target is not None
+        return (self.manual_map_target is not None
+                or self.return_map_target is not None
                 or self.quest_map_target is not None
                 or (self.questless_farm_mode and self.questless_farm_target is not None))
 
@@ -3704,6 +3723,8 @@ class MainWindow(QMainWindow):
                 return
             if self.return_map_target is not None:
                 self.continue_return_map()
+            elif self.manual_map_target is not None:
+                self.continue_manual_map_travel()
             elif self.has_auto_travel_intent():
                 self.continue_quest_map_travel()
 
@@ -4299,6 +4320,8 @@ class MainWindow(QMainWindow):
         max_health = self_state.get("maxHealth", self_state.get("maximumHealth", totals.get("maxHealth", "—")))
         attack = totals.get("attack", totals.get("attackPower", self_state.get("attack", "—")))
         defense = totals.get("defense", self_state.get("defense", "—"))
+        luck = next((source.get(key) for source in (totals, self_state, profile, progress)
+                     for key in ("luck", "luckPercent", "luckValue") if source.get(key) is not None), None)
         gold = profile.get("gold", self_state.get("gold", "—"))
         try:
             gold_display = f"{float(gold):,.2f}"
@@ -4350,6 +4373,7 @@ class MainWindow(QMainWindow):
             values = {"角色": name, "职业": class_display,
                       "等级": level, "状态": status,
                       "经验": f"{experience}/{experience_needed}", "攻击": attack, "防御": defense,
+                      "幸运": f"{luck}%" if luck is not None else "—",
                       "金币": gold_display, "移速加成": f"{totals.get('moveSpeedPercent', 0)}%"}
             for key, value in values.items():
                 if key in self.character_facts:
@@ -5658,6 +5682,7 @@ class MainWindow(QMainWindow):
                 self.auto_route_retry_count = 0
         if self.chase_target is not None:
             self.stop_chase()
+        self.manual_move_active = False
         if self.world_x is None or self.world_y is None:
             self.travel_status.setText("没有服务端位置，无法构造同步帧。")
             return
@@ -5687,7 +5712,7 @@ class MainWindow(QMainWindow):
         if self.server_dead or self.respawn_pending:
             self.move_timer.stop()
             return
-        if self.pending_destination is None or self.pending_portal is None:
+        if self.pending_destination is None and not self.manual_move_active:
             self.move_timer.stop()
             return
         now = time.monotonic()
@@ -5697,6 +5722,17 @@ class MainWindow(QMainWindow):
             self.route_points.pop(0)
         if not self.route_points:
             self.move_timer.stop()
+            if self.manual_move_active:
+                self.manual_move_active = False
+                self.travel_status.setText(f"已到达手动选定位置 ({self.world_x}, {self.world_y})。")
+                try:
+                    self.send_game_packet({"action": "sync", "movementRevision": self.movement_revision,
+                                           "map": self.current_map, "x": round(float(self.world_x), 2),
+                                           "y": round(float(self.world_y), 2), "animation": "idle",
+                                           "attackCritical": False, "flip": False}, log=False)
+                except Exception as exc:
+                    self.travel_status.setText(f"已到达坐标，但最终位置确认失败：{type(exc).__name__}: {exc}")
+                return
             attempt = self.travel_attempt
             self.travel_status.setText("已到入口坐标，补发位置同步并等待服务端确认…")
             try:
@@ -5736,13 +5772,98 @@ class MainWindow(QMainWindow):
 
     def cancel_travel(self) -> None:
         self.return_map_target = None
+        self.manual_map_target = None
+        self.manual_coordinate_target = None
         self.move_timer.stop()
         self.pending_destination = None
         self.pending_portal = None
         self.route_points = []
+        self.manual_move_active = False
         self.travel_attempt += 1
         self.travel_status.setText("已停止自动移动；当前坐标是客户端预计值，重连可取得服务端位置。")
         self.update_map_buttons()
+
+    def continue_manual_map_travel(self) -> None:
+        target = self.manual_map_target
+        if target is None or not self.world_ready or self.server_dead or self.respawn_pending:
+            return
+        if self.current_map == target:
+            self.manual_map_target = None
+            coordinate = self.manual_coordinate_target
+            self.manual_coordinate_target = None
+            if coordinate is not None:
+                if not self.move_to_coordinate(*coordinate):
+                    self.travel_status.setText(
+                        f"已进入 {MAP_NAMES.get(target, target)}，但坐标移动失败：{self.travel_status.text()}")
+            else:
+                self.travel_status.setText(f"已进入批量地图目标：{MAP_NAMES.get(target, target)}。")
+            return
+        if self.pending_destination is not None:
+            return
+        queue = deque([(self.current_map, [])])
+        visited = {self.current_map}
+        while queue:
+            current, route = queue.popleft()
+            for neighbor in MAP_ROUTES.get(current, ()):
+                if neighbor in visited:
+                    continue
+                next_route = route + [neighbor]
+                if neighbor == target:
+                    if 5 in next_route and not self.use_ticket.isChecked():
+                        self.manual_map_target = None
+                        self.manual_coordinate_target = None
+                        self.travel_status.setText("批量目标路线经过废弃遗迹；请先勾选使用入场券。")
+                        return
+                    self.travel_status.setText(
+                        f"批量路线前往 {MAP_NAMES.get(target, target)}，下一站 {MAP_NAMES.get(next_route[0], next_route[0])}。")
+                    self.travel_to(next_route[0])
+                    return
+                visited.add(neighbor)
+                queue.append((neighbor, next_route))
+        self.manual_map_target = None
+        self.manual_coordinate_target = None
+        self.travel_status.setText("找不到通往批量地图目标的已知路线。")
+
+    def start_manual_map_travel(self, destination: int, coordinate_target=None) -> None:
+        self.return_map_target = None
+        self.quest_map_target = None
+        self.manual_map_target = int(destination)
+        self.manual_coordinate_target = coordinate_target
+        self.auto_route_retry_count = 0
+        self.continue_manual_map_travel()
+
+    def move_to_coordinate(self, x: float, y: float) -> bool:
+        """Walk to a manually selected world coordinate on the current map."""
+        if (self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending
+                or self.pending_destination is not None or self.current_map is None
+                or self.world_x is None or self.world_y is None):
+            self.travel_status.setText("角色未就绪，或正在切图/复活，暂时不能执行坐标移动。")
+            return False
+        try:
+            goal = float(x), float(y)
+        except (TypeError, ValueError):
+            self.travel_status.setText("目标坐标无效。")
+            return False
+        start = float(self.world_x), float(self.world_y)
+        if self.current_map in (1, 2):
+            route = find_map_path(self.current_map, start, goal)
+        else:
+            route = [goal]
+        if not route:
+            self.travel_status.setText("当前位置到目标点没有可验证的路线。")
+            return False
+        self.move_timer.stop()
+        self.stop_chase()
+        self.stop_patrol()
+        self.route_points = list(route)
+        self.pending_destination = None
+        self.pending_portal = None
+        self.return_map_target = None
+        self.manual_move_active = True
+        self.last_move_at = time.monotonic()
+        self.travel_status.setText(f"正在前往手动选定位置 ({goal[0]:.0f}, {goal[1]:.0f})…")
+        self.move_timer.start()
+        return True
 
     def continue_return_map(self) -> None:
         if not self.auto_return_map.isChecked() or self.server_dead or self.respawn_pending:
