@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v1.2.18
+        default: v1.2.19
 
 permissions:
   contents: write
@@ -32,4 +32,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          gh release create "$env:RELEASE_TAG" dist/TabbyDesktop-windows-x64.zip --title "Tabby Desktop $env:RELEASE_TAG" --notes-file README-DESKTOP.md
+          gh release create "$env:RELEASE_TAG" dist/TabbyDesktop-windows-x64.zip --target "$env:GITHUB_SHA" --title "Tabby Desktop $env:RELEASE_TAG" --notes-file UPDATE-20261028.md
