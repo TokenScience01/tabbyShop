@@ -1,5 +1,7 @@
 # Tabby 游戏与商城整合版
 
+逐项功能、按钮区别和操作流程见[功能与操作手册](docs/FEATURES.md)。
+
 以此目录为整合项目，`desktop.py` 是统一入口。`game_client/` 包含游戏控制台、小地图、导航数据与项目素材；`server.py` / `index.html` 保留商城后端和网页。原 wssDemo 目录保留，但整合版后续修改应在这里进行。
 
 桌面版品牌图标资源位于 `assets/tabby-logo.png`，Windows 可执行文件使用对应的多尺寸 `assets/tabby-logo.ico`。
