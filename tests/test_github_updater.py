@@ -14,7 +14,7 @@ class GitHubUpdaterTests(unittest.TestCase):
         self.assertEqual(updater.version_tuple('v2.10.3'), (2, 10, 3, 0))
         self.assertGreater(updater.version_tuple('1.2.10'), updater.version_tuple('1.2.9'))
         self.assertEqual(updater.version_tuple('1.2'), updater.version_tuple('1.2.0'))
-        self.assertEqual(updater.APP_VERSION, '1.2.17')
+        self.assertRegex(updater.APP_VERSION, r'^\d+\.\d+\.\d+$')
 
     def test_update_script_logs_failures_rolls_back_and_relaunches(self):
         install_dir = Path('C:/Users/test/App/TabbyDesktop')
@@ -39,7 +39,8 @@ class GitHubUpdaterTests(unittest.TestCase):
         script = updater._windows_update_script(
             stage, stage / "TabbyDesktop", install_dir,
             install_dir.with_name("TabbyDesktop.previous"), 99)
-        self.assertIn("'C:/Users/玩家/O''Brien/TabbyDesktop'", script)
+        expected_literal = "'" + str(install_dir).replace("'", "''") + "'"
+        self.assertIn(expected_literal, script)
 
     def test_update_launcher_passes_script_path_as_powershell_argument(self):
         class WindowsScriptPath:

@@ -298,20 +298,52 @@
     "equipmentLevel": 1,
     "slotType": "AMULET",
     "nameEn": "Starter Amulet",
-    "nameZh": "新手护符"
+    "nameZh": "兽牙护符"
   },
   {
     "itemCode": "STARTER_ARMOR",
     "equipmentLevel": 1,
     "slotType": "ARMOR",
     "nameEn": "Starter Armor",
-    "nameZh": "新手护甲"
+    "nameZh": "皮革衣"
   },
   {
     "itemCode": "STARTER_SHOES",
     "equipmentLevel": 1,
     "slotType": "SHOES",
     "nameEn": "Starter Shoes",
-    "nameZh": "新手鞋"
+    "nameZh": "皮革靴"
+  },
+  {
+    "itemCode": "WOODEN_FISHING_ROD",
+    "nameZh": "木钓竿"
+  },
+  {
+    "itemCode": "BOWP1",
+    "nameZh": "木弓"
+  },
+  {
+    "itemCode": "TREASURE_STONE",
+    "nameZh": "秘宝之石"
+  },
+  {
+    "itemCode": "STAMINA_POTION",
+    "nameZh": "体力恢复药水"
+  },
+  {
+    "itemCode": "TESTER_RING",
+    "nameZh": "VYLO幸运金戒"
+  },
+  {
+    "itemCode": "STARTER_RING",
+    "nameZh": "铜戒"
+  },
+  {
+    "itemCode": "STARTER_HAT",
+    "nameZh": "皮革帽"
+  },
+  {
+    "itemCode": "STARTER_SWORD",
+    "nameZh": "铁短剑"
   }
 ]

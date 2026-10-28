@@ -10,20 +10,36 @@ from pathlib import Path
 
 
 PLAYER_CLEARANCE = 16
-MAP_FILES = {1: "town_navigation.json", 2: "snowfield_navigation.json"}
+MAP_FILES = {1: "town_navigation.json", 2: "snowfield_navigation.json", 7: "treasure_navigation.json"}
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def _map_data(map_id: int = 1) -> tuple[set[tuple[int, int]], list[dict]]:
     data = json.loads(Path(__file__).with_name(MAP_FILES[map_id]).read_text())
     return {tuple(cell) for cell in data["cells"]}, data["obstacles"]
 
 
+@lru_cache(maxsize=3)
+def _obstacle_bins(map_id: int) -> dict:
+    """Index expanded collision bounds; retain the original ellipse test."""
+    bins = {}
+    for obstacle in _map_data(map_id)[1]:
+        rx = obstacle['rx'] + PLAYER_CLEARANCE
+        ry = obstacle['ry'] + PLAYER_CLEARANCE
+        for bx in range(math.floor((obstacle['x'] - rx) / 128),
+                        math.floor((obstacle['x'] + rx) / 128) + 1):
+            for by in range(math.floor((obstacle['y'] - ry) / 128),
+                            math.floor((obstacle['y'] + ry) / 128) + 1):
+                bins.setdefault((bx, by), []).append(obstacle)
+    return bins
+
+
+@lru_cache(maxsize=65536)
 def _walkable(x: float, y: float, map_id: int = 1) -> bool:
     cells, obstacles = _map_data(map_id)
     if (math.floor(x / 64), math.floor(y / 64)) not in cells:
         return False
-    for obstacle in obstacles:
+    for obstacle in _obstacle_bins(map_id).get((math.floor(x / 128), math.floor(y / 128)), ()):
         rx = obstacle["rx"] + PLAYER_CLEARANCE
         ry = obstacle["ry"] + PLAYER_CLEARANCE
         dx, dy = x - obstacle["x"], y - obstacle["y"]

@@ -1,9 +1,20 @@
 """Read-only tactical map rendered from server state and recovered terrain."""
 import json
+from functools import lru_cache
 from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
+
+
+@lru_cache(maxsize=3)
+def terrain_path(filename):
+    """Share immutable map geometry across account dashboards."""
+    cells = json.loads(Path(__file__).with_name(filename).read_text())['cells']
+    path = QPainterPath()
+    for x, y in cells:
+        path.addRect(x * 64, y * 64, 64, 64)
+    return path
 
 
 def peer_map_position(peer, current_map=None):
@@ -29,13 +40,10 @@ class TacticalMap(QWidget):
         self.portals = portals
         self.terrain = {}
         self.setMinimumHeight(320)
-        for map_id, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json')):
+        for map_id, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json'),
+                                 (7, 'treasure_navigation.json')):
             try:
-                cells = json.loads(Path(__file__).with_name(filename).read_text())['cells']
-                path = QPainterPath()
-                for x, y in cells:
-                    path.addRect(x * 64, y * 64, 64, 64)
-                self.terrain[map_id] = path
+                self.terrain[map_id] = terrain_path(filename)
             except (OSError, KeyError, ValueError):
                 pass
 

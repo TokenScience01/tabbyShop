@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local web UI, shop API proxy, and persistent-in-process shop monitor."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -234,6 +234,7 @@ class ShopMonitor:
         self.product_count = 0
         self.revision = 0
         self.scan_count = 0
+        self.generation = 0
         self.events = []
         self.auto_buy_enabled = bool(persisted.get("autoBuyEnabled", False))
         self.buy_count = int(persisted.get("buyCount", 0))
@@ -262,6 +263,7 @@ class ShopMonitor:
     def configure(self, data):
         cfg = normalized_config(data)
         with self.lock:
+            self.generation += 1
             self.config = cfg
             self._persist()
             if self.enabled:
@@ -271,6 +273,7 @@ class ShopMonitor:
     def start(self, data):
         cfg = normalized_config(data)
         with self.lock:
+            self.generation += 1
             self.config = cfg
             self.enabled = True
             self.status = "running"
@@ -281,6 +284,7 @@ class ShopMonitor:
 
     def stop(self):
         with self.lock:
+            self.generation += 1
             self.enabled = False
             self.auto_buy_enabled = False
             self.status = "stopped"
@@ -325,17 +329,22 @@ class ShopMonitor:
     def _find_matches(products, config):
         matches = []
         for product in products:
+            if not isinstance(product, dict):
+                continue
             try:
+                product_id = product.get("id")
+                if isinstance(product_id, bool) or int(product_id) <= 0:
+                    continue
                 price = float(product.get("price"))
                 matches_quality = "*" in config["qualities"] or product.get("qualityCode") in config["qualities"]
                 if (matches_quality and product.get("state") == "ACTIVE" and product.get("market") is not False
                         and not product.get("reserved") and config["minPrice"] <= price < config["maxPrice"]):
                     matches.append(product)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
         return matches
 
-    def _scan_once(self, config):
+    def _scan_once(self, config, generation=None):
         auth = read_token()
         if not auth:
             raise RuntimeError("本地 config.local.json 中没有 Bearer Token")
@@ -343,17 +352,29 @@ class ShopMonitor:
             request = Request(TARGET, headers=self._headers(auth), method="GET")
             with urlopen(request, timeout=25) as response:
                 payload = json.loads(response.read())
+            if not isinstance(payload, dict):
+                raise RuntimeError("商城响应必须是 JSON 对象")
             result = payload.get("products", [])
             if not isinstance(result, list):
                 raise RuntimeError("商城响应中没有商品列表")
             return result
 
+        responses, failures = [], []
         with ThreadPoolExecutor(max_workers=config["concurrency"]) as pool:
-            responses = list(pool.map(fetch_shop, range(config["concurrency"])))
+            futures = [pool.submit(fetch_shop, index) for index in range(config["concurrency"])]
+            for future in as_completed(futures):
+                try:
+                    responses.append(future.result())
+                except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
+                    failures.append(exc)
+        if not responses:
+            raise failures[0]
         # Concurrent responses overlap heavily; retain the newest instance of each product.
         products_by_id = {}
         for result in responses:
             for index, item in enumerate(result):
+                if not isinstance(item, dict):
+                    continue
                 key = str(item.get("id", f"response-item-{index}"))
                 products_by_id[key] = item
         products = list(products_by_id.values())
@@ -362,6 +383,10 @@ class ShopMonitor:
         timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         candidate = matches[0] if matches else None
         with self.lock:
+            if generation is not None and (generation != self.generation or not self.enabled):
+                return
+            if auth != read_token():
+                return
             self.products = products
             self.product_count = len(products)
             self.candidate = candidate
@@ -375,12 +400,13 @@ class ShopMonitor:
             self.events = self.events[:30]
             auto_buy_enabled = self.auto_buy_enabled
         if auto_buy_enabled and candidate:
-            self._process_candidate(candidate, config)
+            self._process_candidate(candidate, config, generation)
 
     def set_auto_buy(self, enabled):
         if enabled and not wallet_address():
             raise ValueError("请先导入 BSC 私钥")
         with self.lock:
+            self.generation += 1
             self.auto_buy_enabled = bool(enabled)
             if enabled:
                 self.buy_count = 0
@@ -392,17 +418,19 @@ class ShopMonitor:
             self._persist()
         return self.snapshot()
 
-    def _process_candidate(self, product, config):
+    def _process_candidate(self, product, config, generation=None):
         product_id = int(product.get("id", 0))
         with self.buy_lock:
-            if not product_id or product_id in self.attempted_products:
-                return
-            self.attempted_products.add(product_id)
             with self.lock:
+                if generation is not None and (generation != self.generation or not self.enabled):
+                    return
+                if not product_id or product_id in self.attempted_products:
+                    return
                 if not self.auto_buy_enabled or self.buy_count >= config["maxCount"] or self.buy_total >= config["budget"]:
                     self.auto_buy_enabled = False
                     self._persist()
                     return
+                self.attempted_products.add(product_id)
                 self._persist()
             try:
                 result = execute_purchase(product, config)
@@ -443,27 +471,32 @@ class ShopMonitor:
 
     def _run(self):
         while True:
-            self.wake.wait()
-            self.wake.clear()
             with self.lock:
                 enabled = self.enabled
                 config = dict(self.config)
+                generation = self.generation
+                # Clear under the state lock so configure/start/stop cannot
+                # lose their wake-up between reading state and clearing it.
+                self.wake.clear()
             if not enabled:
+                self.wake.wait()
                 continue
             try:
-                self._scan_once(config)
+                self._scan_once(config, generation)
             except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
                 timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
                 with self.lock:
-                    self.error = str(exc)
-                    self.status = "error"
-                    self.last_scan = timestamp
-                    self.events.insert(0, {"time": timestamp, "ok": False, "label": self.error, "matches": 0})
-                    self.events = self.events[:30]
+                    if generation == self.generation and self.enabled:
+                        self.error = str(exc)
+                        self.status = "error"
+                        self.last_scan = timestamp
+                        self.events.insert(0, {"time": timestamp, "ok": False, "label": self.error, "matches": 0})
+                        self.events = self.events[:30]
             with self.lock:
                 delay = self.config["interval"]
                 enabled = self.enabled
-            if enabled:
+                changed = generation != self.generation
+            if enabled and not changed:
                 self.wake.wait(delay)
 
 

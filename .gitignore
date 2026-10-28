@@ -1,6 +1,36 @@
 config.local.json
 monitor.local.json
 
+# Private runtime data and credentials (including backups)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local.json
+config.local.json*
+monitor.local.json*
+shop-profiles.json*
+credential-vault/
+wallet.part*
+.ssh/
+id_rsa*
+id_ed25519*
+*.pem
+*.key
+*.p12
+*.pfx
+*.har
+*.reg
+*.log
+*.bak
+*.backup
+/logs/
+/captures/
+/screenshots/
+
+# Local public-client archives, recovery projects, downloaded tools and test dumps
+/exports/
+
 # Local IDE settings
 .idea/
 

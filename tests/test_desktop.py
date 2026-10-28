@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
@@ -60,6 +61,55 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(self.window.game.dashboard_header.isHidden())
         self.window.game.set_state('已连接')
         self.assertIn('已连接', self.window.account_status.text())
+
+    def test_account_metadata_bursts_only_rebuild_rows_once(self):
+        game = self.window.game
+        self.window._game_sessions['mock-wallet'] = game
+        self.window._account_refresh_timer.stop()
+        with patch.object(self.window, 'refresh_planner_accounts') as refresh:
+            for _ in range(20):
+                self.window.on_game_metadata(game)
+            self.assertTrue(self.window._account_refresh_timer.isActive())
+            refresh.assert_not_called()
+            loop = QEventLoop()
+            QTimer.singleShot(600, loop.quit)
+            loop.exec()
+            self.assertEqual(refresh.call_count, 1)
+            self.assertFalse(self.window._account_refresh_timer.isActive())
+
+    def test_world_snapshot_bursts_coalesce_expensive_ui_refresh(self):
+        game = self.window.game
+        game.current_map = 2
+        game.world_ready = True
+        with patch.object(game, 'refresh_snapshot_ui', wraps=game.refresh_snapshot_ui) as refresh:
+            for _ in range(20):
+                game.accept_packet({'type': 'snapshot', 'self': {}, 'monsters': [], 'peers': []})
+            refresh.assert_not_called()
+            loop = QEventLoop()
+            QTimer.singleShot(260, loop.quit)
+            loop.exec()
+            self.assertEqual(refresh.call_count, 1)
+
+    def test_hidden_account_dashboard_does_not_rebuild_snapshot_widgets(self):
+        game = self.window.game
+        game.world_ready = True
+        self.assertFalse(game.minimap.isVisible())
+        with (patch.object(game, 'refresh_character_status') as character,
+              patch.object(game, 'refresh_monster_table') as monsters):
+            game.refresh_snapshot_ui()
+        character.assert_not_called()
+        monsters.assert_not_called()
+
+    def test_explicit_account_refresh_cancels_pending_duplicate(self):
+        self.window.request_account_refresh()
+        self.window.refresh_account_rows()
+        self.assertFalse(self.window._account_refresh_timer.isActive())
+
+    def test_closing_window_does_not_restart_account_refresh_timer(self):
+        self.window.request_account_refresh()
+        self.window.close()
+        self.window.request_account_refresh()
+        self.assertFalse(self.window._account_refresh_timer.isActive())
 
     def test_multi_account_planner_applies_mode_to_selected_connected_accounts(self):
         game = self.window.game
@@ -193,7 +243,9 @@ class DesktopTests(unittest.TestCase):
         game.world_x, game.world_y = 100.0, 100.0
         game.movement_revision = 1
         try:
-            with patch('wss_tester.find_map_path', return_value=[(120.0, 130.0)]) as find_path:
+            future = Future()
+            future.set_result([(120.0, 130.0)])
+            with patch('wss_tester.submit_map_path', return_value=future) as find_path:
                 self.assertTrue(game.move_to_coordinate(120, 130))
             find_path.assert_called_once_with(1, (100.0, 100.0), (120.0, 130.0))
             self.assertTrue(game.manual_move_active)
@@ -323,19 +375,30 @@ class DesktopTests(unittest.TestCase):
         addresses = ['0x' + 'a' * 37 + suffix for suffix in ('444', '222', '111', '333')]
         expected = [addresses[2], addresses[1], addresses[3], addresses[0]]
         vault = self.window.game.credential_vault
+        queued_callbacks = []
+
+        def queue_zero_delay_callback(delay, callback):
+            if delay == 0:
+                queued_callbacks.append(callback)
+
         with (patch.object(vault, 'list_wallets', return_value=addresses),
               patch.object(self.window, 'ask_shared_passphrase', return_value='shared123'),
               patch.object(self.window, 'connect_account') as connect,
-              patch.object(QTimer, 'singleShot')):
+              patch.object(QTimer, 'singleShot', side_effect=queue_zero_delay_callback)):
             self.window.refresh_planner_accounts()
             self.window.set_all_planner_accounts(True)
             self.window.batch_connect_accounts()
+            self.assertEqual([call.args[0] for call in connect.call_args_list], expected[:1])
+            while queued_callbacks:
+                queued_callbacks.pop(0)()
             self.assertEqual([call.args[0] for call in connect.call_args_list],
                              expected[:3])
             self.assertTrue(all(call.kwargs.get('background') for call in connect.call_args_list))
             self.assertEqual(len(self.window._batch_login_inflight), 3)
             self.window._finish_batch_login_result(
                 expected[0], {'ok': True, 'token': 'first-session'})
+            while queued_callbacks:
+                queued_callbacks.pop(0)()
             self.assertEqual(connect.call_args_list[-1].args[0], expected[3])
             self.window._finish_batch_login_result(
                 expected[1], {'ok': True, 'token': 'second-session'})
@@ -343,7 +406,7 @@ class DesktopTests(unittest.TestCase):
                 expected[2], {'ok': True, 'token': 'third-session'})
             self.window._finish_batch_login_result(
                 expected[3], {'ok': True, 'token': 'fourth-session'})
-        self.assertIn('批量上线已发起 4 个账号', self.window.planner_status.text())
+        self.assertIn('批量上线已完成 4 个账号', self.window.planner_status.text())
 
     def test_background_wallets_get_distinct_game_sessions(self):
         addresses = ['0x' + '1' * 37 + '111', '0x' + '2' * 37 + '222']
@@ -492,6 +555,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(character_creation_payload(' 新角色_7 ', 'WARRIOR'),
                          {'name': '新角色_7', 'characterClass': 'WARRIOR'})
         self.assertEqual(character_creation_payload('Guard2', 'GUARD')['characterClass'], 'GUARD')
+        self.assertEqual(character_creation_payload('Archer3', 'ARCHER')['characterClass'], 'ARCHER')
         for name, character_class in [('x', 'WARRIOR'), ('a name', 'WARRIOR'),
                                       ('valid', 'MAGE')]:
             with self.subTest(name=name, character_class=character_class):
@@ -510,6 +574,240 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(game.create_character_button.isHidden())
         self.assertFalse(game.character_creation_prompted)
 
+    def test_batch_login_failure_does_not_open_modal_after_state_callback(self):
+        game = self.window.game
+        address = '0x' + '1' * 40
+        self.window._game_sessions[address] = game
+        self.window._game_address_by_bridge[id(game.bridge)] = address
+        self.window._batch_login_active = True
+        self.window._batch_login_inflight = {address}
+        game._batch_login_silent = True
+        with patch.object(QMessageBox, 'warning') as warning:
+            game.finish_signed_login({'ok': False, 'error': 'test login error'})
+        warning.assert_not_called()
+        self.assertFalse(self.window._batch_login_inflight)
+
+    def test_batch_uncreated_current_account_never_opens_creation_dialog(self):
+        game = self.window.game
+        address = '0x' + '1' * 40
+        self.window._game_sessions[address] = game
+        self.window._game_address_by_bridge[id(game.bridge)] = address
+        self.window.active_address = address
+        self.window._batch_login_active = True
+        self.window._batch_login_inflight = {address}
+        game._batch_login_silent = True
+        game.pending_world_entry = True
+        game.signed_session_token = 'test-session'
+        with (patch.object(game, 'show_character_creation_dialog') as dialog,
+              patch.object(game, 'connect_ws') as connect):
+            game.accept_profile_data({'loginPreflight': True,
+                                      'loginPreflightGeneration': game._login_generation,
+                                      'player': {'characterCreated': False}})
+            self.app.processEvents()
+        dialog.assert_not_called()
+        connect.assert_not_called()
+        self.assertTrue(game.character_creation_required)
+        self.assertFalse(self.window._batch_login_inflight)
+        self.assertEqual(self.window._batch_login_failed, 0)
+        self.assertEqual(self.window._batch_login_needs_character, {address})
+
+    def test_mixed_batch_releases_uncreated_account_slot_and_can_open_creation_later(self):
+        addresses = ['0x' + str(i) * 40 for i in range(1, 5)]
+        vault = self.window.game.credential_vault
+        self.window._master_passphrase = 'test-password'
+        with (patch.object(vault, 'list_wallets', return_value=addresses),
+              patch.object(DesktopGameWindow, 'connect_ws') as connect,
+              patch.object(self.window, 'prepare_shop_account_context')):
+            self.window.refresh_planner_accounts()
+            self.window.set_all_planner_accounts(True)
+            self.window.batch_connect_accounts()
+            for _ in range(5):
+                self.app.processEvents()
+            self.assertEqual(len(self.window._batch_login_inflight), 3)
+            waiting = self.window._game_sessions[addresses[0]]
+            waiting.pending_world_entry = True
+            waiting.signed_session_token = 'pending-character-session'
+            with patch.object(waiting, 'show_character_creation_dialog') as dialog:
+                waiting.accept_profile_data({'loginPreflight': True,
+                    'loginPreflightGeneration': waiting._login_generation,
+                    'player': {'characterCreated': False}})
+                self.app.processEvents()
+                dialog.assert_not_called()
+                self.assertIn(addresses[3], self.window._game_sessions)
+                self.assertNotIn(addresses[0], self.window._batch_login_inflight)
+                for address in addresses[1:]:
+                    self.window._game_sessions[address].bridge.state.emit('已连接')
+                self.assertFalse(self.window._batch_login_active)
+                self.assertEqual(self.window._batch_login_failed, 0)
+                self.assertIn('1 个待创建角色', self.window.planner_status.text())
+                self.window.refresh_account_rows()
+                row = self.window.account_rows.itemAt(0).widget()
+                self.assertIn('创建角色', [button.text() for button in row.findChildren(QPushButton)])
+                connect.reset_mock()
+                self.window.connect_account(addresses[0])
+                self.app.processEvents()
+                dialog.assert_called_once()
+                connect.assert_not_called()
+                self.assertFalse(waiting._background_login)
+                self.window.connect_account(addresses[0])
+                self.app.processEvents()
+                self.assertEqual(dialog.call_count, 2)
+
+    def test_previous_batch_timeout_cannot_disconnect_later_attempt(self):
+        game = self.window.game
+        address = '0x' + '1' * 40
+        self.window._game_sessions[address] = game
+        self.window._batch_login_active = True
+        self.window._batch_login_inflight = {address}
+        old_run, current_run = object(), object()
+        self.window._batch_login_timeouts[address] = current_run
+        with patch.object(game, 'disconnect_ws') as disconnect:
+            self.window._batch_login_timeout(address, old_run)
+            disconnect.assert_not_called()
+            self.assertEqual(self.window._batch_login_inflight, {address})
+            self.window._batch_login_timeout(address, current_run)
+            disconnect.assert_called_once()
+        self.assertEqual(self.window._batch_login_failed, 1)
+
+    def test_archer_uses_ranged_attack_and_directional_impact_frames(self):
+        game = self.window.game
+        game.api_profile = {'characterClass': 'ARCHER'}
+        self.assertEqual(game.attack_reach(), 295)
+        self.assertEqual(game.attack_reach(impact=True), 310)
+        game.attack_elevation = 0
+        sideways, _, speed = game.attack_timing(False)
+        game.attack_elevation = 1
+        downward, _, _ = game.attack_timing(True)
+        self.assertEqual(sideways, round(7 * (0.88 / 12) / speed * 1000))
+        self.assertLess(downward, sideways)
+        game.world_ready = True
+        game.current_map = 2
+        game.world_x = game.world_y = 0
+        game.monster_level_limited.setChecked(False)
+        game.monsters = {'target': {'mapId': 2, 'health': 10, 'x': 250, 'y': 0}}
+        game.next_attack = {'id': 'archer-ticket'}
+        game.ws = object()
+        try:
+            with patch.object(game, 'send_game_packet') as send, patch('wss_tester.QTimer.singleShot'):
+                self.assertTrue(game.attack_monster('target'))
+                self.assertEqual(send.call_args.args[0]['attackElevation'], 0)
+                game.send_monster_attack('target', 'archer-ticket')
+                self.assertEqual(send.call_args.args[0]['action'], 'monsterAttack')
+            game.last_self_state['characterClass'] = 'GUARD'
+            self.assertEqual(game.attack_reach(), 55)
+        finally:
+            game.ws = None
+
+    def test_treasure_stone_requires_manual_action_and_server_position(self):
+        game = self.window.game
+        game.world_ready = True
+        game.current_map = 1
+        game.world_x = game.world_y = 100
+        game.ws = object()
+        game.last_self_state = {'treasureStones': 1}
+        try:
+            with patch.object(game, 'send_game_packet') as send:
+                game.update_activity_controls()
+                send.assert_not_called()
+                self.assertTrue(game.request_activity('useTreasureStone'))
+                self.assertEqual(send.call_args.args[0], {'action': 'useTreasureStone'})
+                self.assertEqual(game.current_map, 1)
+                self.assertFalse(game.request_activity('useTreasureStone'))
+                game.accept_packet({'type': 'treasure_position', 'revision': 4, 'map': 7,
+                                    'x': 3872, 'y': 7360, 'serverTime': 1000,
+                                    'expiresAt': 3601000, 'treasureStones': 0})
+                self.assertEqual(game.current_map, 7)
+                self.assertEqual(game.movement_revision, 4)
+                self.assertFalse(game.auto_attack.isChecked())
+                self.assertFalse(game.activity_buttons['useTreasureStone'].isEnabled())
+                game.accept_packet({'type': 'treasure_position', 'revision': 3, 'map': 1, 'x': 0, 'y': 0})
+                self.assertEqual(game.current_map, 7)
+                game.accept_packet({'type': 'treasure_position', 'revision': 5, 'map': 1,
+                                    'x': 928, 'y': 928, 'serverTime': 3601000, 'expiresAt': 3601000,
+                                    'expired': True})
+                self.assertEqual(game.current_map, 1)
+                self.assertFalse(game.activity_buttons['enterTreasureLand'].isEnabled())
+        finally:
+            game.ws = None
+
+    def test_fishing_rod_sends_owned_item_id_without_equipping_or_consuming(self):
+        game = self.window.game
+        game.world_ready = True
+        game.current_map = 1
+        game.world_x = game.world_y = 100
+        game.api_equipment = {'items': [{'playerItemId': 42, 'itemCode': 'WOODEN_FISHING_ROD', 'slotType': 'OTHER'}]}
+        game.ws = object()
+        try:
+            with patch.object(game, 'send_game_packet') as send:
+                self.assertTrue(game.request_activity('useFishingRod'))
+                self.assertEqual(send.call_args.args[0], {'action': 'useFishingRod', 'playerItemId': 42})
+                self.assertEqual(game.fishing_rod()['playerItemId'], 42)
+                game.accept_packet({'type': 'fishing_rod_failed'})
+                self.assertIsNone(game._activity_pending)
+        finally:
+            game.ws = None
+
+    def test_stamina_potion_requires_resource_and_waits_for_confirmation(self):
+        game = self.window.game
+        game.world_ready = True
+        game.current_map = 1
+        game.last_self_state = {'staminaPotions': 1, 'farming': {'staminaPercent': 100}}
+        game.ws = object()
+        try:
+            with patch.object(game, 'send_game_packet') as send:
+                self.assertFalse(game.request_activity('useStaminaPotion'))
+                send.assert_not_called()
+                game.last_self_state['farming']['staminaPercent'] = 50
+                self.assertTrue(game.request_activity('useStaminaPotion'))
+                self.assertEqual(game.last_self_state['staminaPotions'], 1)
+                game.accept_packet({'type': 'stamina_potion_used', 'quantity': 0})
+                self.assertEqual(game.last_self_state['staminaPotions'], 0)
+                self.assertEqual(game.last_self_state['farming']['staminaPercent'], 100)
+        finally:
+            game.ws = None
+
+    def test_class_restriction_excludes_wrong_profession_from_auto_equipment(self):
+        game = self.window.game
+        game.api_profile = {'characterClass': 'ARCHER'}
+        game.api_equipment = {'items': [{'playerItemId': 50, 'slotType': 'WEAPON',
+                                        'requiredClass': 'WARRIOR', 'attack': 999}]}
+        with patch.object(game, 'request_social_api') as request:
+            game.auto_equip_best_inventory_item()
+        request.assert_not_called()
+        self.assertTrue(game.equipment_matches_class({'requiredClass': 'ARCHER'}))
+
+    def test_delivery_requires_exact_manual_item_selection(self):
+        game = self.window.game
+        game._delivery_requested_id = 31
+        game.show_quest_delivery({'quest': {'target': 2, 'runNumber': 7}, 'items': [
+            {'playerItemId': 10, 'itemCode': 'SWORDP1'},
+            {'playerItemId': 11, 'itemCode': 'SWORDP1'},
+            {'playerItemId': 12, 'itemCode': 'SWORDP1', 'equipped': True}]})
+        try:
+            checks = game._delivery_dialog.findChildren(QCheckBox)
+            self.assertEqual(len(checks), 2)
+            with patch.object(game, 'request_social_api') as request:
+                self.assertFalse(game._delivery_confirm.isEnabled())
+                checks[0].setChecked(True)
+                self.assertFalse(game._delivery_confirm.isEnabled())
+                checks[1].setChecked(True)
+                request.assert_not_called()
+                game._delivery_confirm.click()
+                self.assertEqual(request.call_args.args, ('questDeliver', '/quests/deliver', 'POST',
+                                 {'questId': 31, 'runNumber': 7, 'itemIds': [10, 11]}))
+                game._delivery_dialog.close()
+                self.assertFalse(game.quest_delivery_button.isEnabled())
+                self.assertTrue(game._delivery_submit_pending)
+        finally:
+            game._delivery_dialog.close()
+
+    def test_old_attack_idle_callback_does_not_interrupt_next_attack(self):
+        game = self.window.game
+        game.last_attack_ticket = 'new-ticket'
+        with patch.object(game, 'send_game_packet') as send:
+            game.send_idle_after_attack(game.combat_generation, 'old-ticket')
+        send.assert_not_called()
+
     def test_login_preflight_pauses_world_entry_for_new_character(self):
         game = self.window.game
         game.pending_world_entry = True
@@ -517,6 +815,7 @@ class DesktopTests(unittest.TestCase):
         with patch.object(game, 'connect_ws') as connect_ws:
             game.accept_profile_data({
                 'loginPreflight': True,
+                'loginPreflightGeneration': game._login_generation,
                 'player': {'player': {'characterCreated': False}},
             })
         self.assertTrue(game.character_creation_required)
@@ -531,6 +830,7 @@ class DesktopTests(unittest.TestCase):
         with patch.object(game, 'connect_ws') as connect_ws:
             game.accept_profile_data({
                 'loginPreflight': True,
+                'loginPreflightGeneration': game._login_generation,
                 'player': {'player': {'characterCreated': True, 'playerName': 'Hero'}},
             })
         self.assertFalse(game.pending_world_entry)
@@ -542,6 +842,7 @@ class DesktopTests(unittest.TestCase):
         with patch.object(game, 'connect_ws') as connect_ws:
             game.accept_profile_data({
                 'loginPreflight': True,
+                'loginPreflightGeneration': game._login_generation,
                 'loginPreflightError': 'HTTP 502',
             })
         self.assertTrue(game.pending_world_entry)
@@ -830,7 +1131,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual([quality_color(f'L{level}') for level in range(1, 5)],
                          ['#667085', '#1976B2', '#7B3FA1', '#9A6500'])
         self.assertEqual(QUALITY_NAMES_ZH['L4'], '传说')
-        self.assertEqual(localized_item_name({'itemCode': 'STARTER_SHOES'}), '新手鞋')
+        self.assertEqual(localized_item_name({'itemCode': 'STARTER_SHOES'}), '皮革靴')
 
     def test_game_palette_and_action_buttons_are_visibly_clickable(self):
         game = self.window.game
@@ -873,7 +1174,7 @@ class DesktopTests(unittest.TestCase):
              'qualityCode': 'L1', 'equipmentLevel': 1, 'equipped': False},
         ]}
         game.update_social_inventory()
-        self.assertEqual(game.social_inventory_table.item(0, 0).text(), '新手鞋')
+        self.assertEqual(game.social_inventory_table.item(0, 0).text(), '皮革靴')
 
     def test_dashboard_labels_wait_for_real_profile_without_duplicate_placeholder(self):
         self.window.tabs.setCurrentIndex(1)
@@ -971,11 +1272,14 @@ class DesktopTests(unittest.TestCase):
         game.ws = None
 
     def test_source_item_name_table_covers_all_bundled_equipment_codes(self):
-        self.assertEqual(len(ITEM_NAMES_ZH), 90)  # 45 item codes and their English-name aliases
+        self.assertGreaterEqual(len(ITEM_NAMES_ZH), 98)
         self.assertEqual(localized_item_name({'itemCode': 'armor-p6'}), '王者战甲')
         self.assertEqual(localized_item_name({'itemCode': 'HEALTH_POTION'}), '生命药水')
-        self.assertEqual(localized_item_name({'itemCode': 'STARTER_AMULET'}), '新手护符')
-        self.assertEqual(localized_item_name({'nameEn': 'STARTER_ARMOR'}), '新手护甲')
+        self.assertEqual(localized_item_name({'itemCode': 'STARTER_AMULET'}), '兽牙护符')
+        self.assertEqual(localized_item_name({'nameEn': 'STARTER_ARMOR'}), '皮革衣')
+        self.assertEqual(localized_item_name({'itemCode': 'BOWP1'}), '木弓')
+        self.assertEqual(localized_item_name({'itemCode': 'TREASURE_STONE'}), '秘宝之石')
+        self.assertNotIn('', ITEM_NAMES_ZH)
         self.assertEqual(localized_item_name({'nameEn': 'Unmapped Blade', 'slotType': 'WEAPON'}), '未收录武器')
 
     def test_compact_dashboard_exposes_potion_toggle_and_combat_feed(self):
@@ -1207,9 +1511,12 @@ class DesktopTests(unittest.TestCase):
         game.auto_attack.setChecked(True)
         game.auto_attack.blockSignals(False)
         game.patrol_ring = 2880
-        with patch('wss_tester.find_map_path', return_value=[(3872, 4608)]) as find_path:
+        with patch.object(game, 'request_map_path') as request_path:
             game.start_patrol()
-        self.assertGreaterEqual(find_path.call_args.kwargs['max_distance'], 3200)
+        request_path.assert_called_once()
+        self.assertEqual(request_path.call_args.args[0], 2)
+        self.assertEqual(request_path.call_args.args[3], 'patrol')
+        self.assertGreater(request_path.call_args.args[2][0], 7000)
         game.stop_patrol(reset_anchor=True)
         game.auto_attack.setChecked(False)
         game.ws = None
@@ -1391,6 +1698,7 @@ class DesktopTests(unittest.TestCase):
             {'encounterId': 'map-2-monster', 'name': 'skeleton', 'mapId': 2,
              'x': 30, 'y': 40, 'health': 100, 'maxHealth': 100},
         ]})
+        self.assertEqual(set(game.monsters_on_current_map()), {'map-1-monster'})
 
         # The live Godot client preserves its snapshot cache across travel;
         # v2 frames only carry changed monster rows.
@@ -1408,6 +1716,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(game.monsters['map-2-monster']['health'], 75)
         self.assertEqual(game.monsters['map-2-monster']['x'], 30)
         self.assertIn('map-1-monster', game.monsters)
+        self.assertEqual(set(game.monsters_on_current_map()), {'map-2-monster'})
         self.assertEqual(game.monster_table.rowCount(), 1)
 
     def test_full_monster_snapshot_replaces_delta_cache(self):
@@ -1437,8 +1746,12 @@ class DesktopTests(unittest.TestCase):
         game.monster_level_limited.setChecked(False)
         game.next_attack = {}
 
-        with patch('game_client.wss_tester.find_map_path', return_value=[(3872, 7168)]):
+        with patch.object(game, 'request_map_path') as request_path:
             game.auto_attack_tick()
+            request_path.assert_called_once()
+        game._pending_path_request = {
+            'id': 1, 'kind': 'patrol', 'context': {'map': 2, 'row': 1, 'row_count': 25}}
+        game.on_map_path_ready(1, [(3872, 7168)], None)
         self.assertTrue(game.patrol_timer.isActive())
         self.assertEqual(game.patrol_route, [(3872, 7168)])
 

@@ -8,6 +8,7 @@ from collections import deque
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import socket
 import ssl
@@ -20,7 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from town_navigation import find_map_path, find_town_path
+from navigation_service import submit_map_path
 from minimap import TacticalMap, peer_map_position
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings, QSize
@@ -111,8 +112,13 @@ class MiniWebSocket:
         self.status_line = ""
         self.response_headers: dict[str, str] = {}
         self.selected_protocol = ""
+        self._recv_buffer = bytearray()
 
     def connect(self) -> None:
+        self._recv_buffer.clear()
+        self.response_headers.clear()
+        self.close_code = None
+        self.close_reason = ""
         parsed = urllib.parse.urlsplit(self.url)
         if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
             raise WsError("地址必须是 ws:// 或 wss://，并包含主机名。")
@@ -149,13 +155,16 @@ class MiniWebSocket:
 
         response = bytearray()
         while b"\r\n\r\n" not in response:
-            chunk = self.sock.recv(1)
+            chunk = self.sock.recv(4096)
             if not chunk:
                 raise WsError("服务端在返回 HTTP 握手响应前关闭了 TCP/TLS 连接。")
             response += chunk
-            if len(response) > 65536:
+            header_end = response.find(b"\r\n\r\n")
+            if (header_end < 0 and len(response) > 65536) or header_end > 65536:
                 raise WsError("握手响应头超过 64 KB。")
-        head = bytes(response).split(b"\r\n\r\n", 1)[0].decode("iso-8859-1", "replace")
+        head_bytes, _, buffered = bytes(response).partition(b"\r\n\r\n")
+        self._recv_buffer.extend(buffered)
+        head = head_bytes.decode("iso-8859-1", "replace")
         rows = head.split("\r\n")
         self.status_line = rows[0]
         for row in rows[1:]:
@@ -173,6 +182,10 @@ class MiniWebSocket:
     def _read_exact(self, n: int) -> bytes:
         assert self.sock is not None
         out = bytearray()
+        if self._recv_buffer:
+            count = min(n, len(self._recv_buffer))
+            out.extend(self._recv_buffer[:count])
+            del self._recv_buffer[:count]
         while len(out) < n:
             part = self.sock.recv(n - len(out))
             if not part:
@@ -243,16 +256,20 @@ class MiniWebSocket:
                 return message_opcode, bytes(fragments)
 
     def close(self) -> None:
-        if self.sock is not None:
-            try:
-                self._send_frame(8, struct.pack("!H", 1000))
-            except OSError:
-                pass
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-            self.sock = None
+        self._recv_buffer.clear()
+        sock, self.sock = self.sock, None
+        if sock is None:
+            return
+        # Closing a stalled TCP socket must never wait on the writer lock or a
+        # blocking sendall call from the GUI thread.
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 class Bridge(QObject):
@@ -267,18 +284,25 @@ class Bridge(QObject):
     keyring_status = Signal(str)
     notification_result = Signal(str, bool, str)
     shop_notification = Signal(str, str, str)
+    path_result = Signal(int, object, object)
+    writer_failed = Signal(object, str)
 
 
 MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地",
              3: "Stone Valley · 石谷", 4: "Western Wilds · 西部荒野",
-             5: "Abandoned Ruins · 废弃遗迹", 6: "Southern Forest · 南部森林"}
+             5: "Abandoned Ruins · 废弃遗迹", 6: "Southern Forest · 南部森林",
+             7: "Treasure Land · 秘宝之地"}
 MAP_ROUTES = {1: (2, 4, 5, 6), 2: (1,), 3: (6,),
-              4: (1,), 5: (1,), 6: (1, 3)}
+              4: (1,), 5: (1,), 6: (1, 3), 7: (1,)}
 CHARACTER_NAMES_ZH = {"WARRIOR": "战士", "GUARD": "守卫", "LANCER": "枪兵", "ARCHER": "弓手"}
+ACTIVITY_ITEM_ACTIONS = {'WOODEN_FISHING_ROD': 'useFishingRod',
+                         'STAMINA_POTION': 'useStaminaPotion', 'TREASURE_STONE': 'useTreasureStone'}
 # Names mirrored from the game's bundled resources/localization/names_zh.gd.
 MONSTER_NAMES_ZH = {
     "skeleton": "骷髅怪", "elite_skeleton": "精英骷髅怪",
     "neiro_pump": "南瓜首领",
+    "treasure_thief": "盗宝人", "conso": "Conso", "bnb_world": "BNB World",
+    "spacedog": "太空狗",
 }
 SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES": "鞋子",
                  "RING": "戒指", "AMULET": "护符", "OTHER": "消耗品"}
@@ -304,6 +328,8 @@ NEARBY_PLAYER_TTL_SECONDS = 8.0
 def equipment_icon(item: dict) -> QIcon:
     """Return the matching extracted game sprite for an equipment item."""
     code = str(item.get("itemCode", "")).lower()
+    if code.startswith('bow'):
+        return QIcon(str(Path(__file__).with_name('assets') / 'bow_p1.png'))
     slot = str(item.get("slotType", "")).upper()
     stem = next((candidate for candidate in ("sword", "helmet", "armor", "boots", "shoes", "ring", "amulet")
                  if candidate in code), "")
@@ -335,7 +361,7 @@ except (OSError, ValueError):
 ITEM_NAMES_ZH = {str(row.get("itemCode", "")).upper(): row.get("nameZh", "")
                  for row in _item_name_rows if isinstance(row, dict)}
 ITEM_NAMES_ZH.update({str(row.get("nameEn", "")).casefold(): row.get("nameZh", "")
-                      for row in _item_name_rows if isinstance(row, dict)})
+                      for row in _item_name_rows if isinstance(row, dict) and row.get('nameEn')})
 _COMPACT_EN_ITEM_NAMES_ZH = {
     re.sub(r"[^A-Z0-9]", "", str(row.get("nameEn", "")).upper()): row.get("nameZh", "")
     for row in _item_name_rows if isinstance(row, dict) and row.get("nameEn")
@@ -437,7 +463,7 @@ def character_creation_payload(name: str, character_class: str) -> dict:
     normalized_name = str(name).strip()
     if re.fullmatch(r"[\w]{2,12}", normalized_name, flags=re.UNICODE) is None:
         raise ValueError("角色名需为 2–12 个字母、数字或下划线")
-    if character_class not in {"WARRIOR", "GUARD"}:
+    if character_class not in {"WARRIOR", "GUARD", "ARCHER"}:
         raise ValueError("请选择有效的角色职业")
     return {"name": normalized_name, "characterClass": character_class}
 
@@ -466,6 +492,7 @@ PORTAL_CENTERS = {
     (2, 1): (3872, 7616), (3, 6): (608, 608),
     (4, 1): (9136, 1568), (5, 1): (48, 2528),
     (6, 1): (3872, 96), (6, 3): (7264, 4320),
+    (7, 1): (3872, 7616),
 }
 
 KEYRING_SERVICE = "Tabby Desktop"
@@ -504,14 +531,24 @@ class MainWindow(QMainWindow):
         self.bridge.sign_challenge.connect(self.confirm_sign_challenge)
         self.bridge.notification_result.connect(self.on_notification_result)
         self.bridge.shop_notification.connect(self.on_shop_notification)
+        self.bridge.path_result.connect(self.on_map_path_ready)
+        self.bridge.writer_failed.connect(self.on_writer_failed)
+        self._path_generation = 0
+        self._pending_path_request = None
+        self._path_future = None
         self.ws: MiniWebSocket | None = None
         self.reader: threading.Thread | None = None
+        self.writer: threading.Thread | None = None
+        self._writer_queue = None
+        self._writer_stop = None
+        self._writer_ws = None
         self.session_token = ""
         self.signed_session_token = ""
         self._resolved_token = ""
         self.credential_vault = CredentialVault()
         self._vault_passphrase: str | None = None
         self._batch_login_silent = False
+        self._background_login = False
         self._login_generation = 0
         self.manual_disconnect = False
         self._auto_reconnect_login = False
@@ -523,6 +560,7 @@ class MainWindow(QMainWindow):
         self.tabby_balance_display = ""
         self._fatigue_exhaustion_handled = False
         self._quest_notification_state = None
+        self._portrait_pixmap_cache = {}
         self._known_equipment_ids = None
         self._auto_equip_attempted_ids = set()
         self._auto_equip_pending_id = None
@@ -559,7 +597,7 @@ class MainWindow(QMainWindow):
         self.connection_stable_timer.setInterval(30000)
         self.connection_stable_timer.timeout.connect(self.reset_reconnect_backoff)
         self.telemetry_timer = QTimer(self)
-        self.telemetry_timer.setInterval(300)
+        self.telemetry_timer.setInterval(1000)
         self.telemetry_timer.timeout.connect(self.update_live_telemetry)
 
         root = QWidget()
@@ -803,9 +841,13 @@ class MainWindow(QMainWindow):
         map_layout.addWidget(self.map_activity)
         outer.addWidget(map_card)
         self.minimap_timer = QTimer(self)
-        self.minimap_timer.setInterval(200)
+        self.minimap_timer.setInterval(500)
         self.minimap_timer.timeout.connect(self.refresh_minimap)
         self.minimap_timer.start()
+        self._snapshot_ui_timer = QTimer(self)
+        self._snapshot_ui_timer.setSingleShot(True)
+        self._snapshot_ui_timer.setInterval(200)
+        self._snapshot_ui_timer.timeout.connect(self.refresh_snapshot_ui)
         self.api_profile = {}
         self.api_equipment = {}
         self.character_creation_required = False
@@ -895,7 +937,7 @@ class MainWindow(QMainWindow):
         self.auto_return_map = QCheckBox("复活后自动进入")
         self.return_map = QComboBox()
         for map_id, name in MAP_NAMES.items():
-            if map_id != 1:
+            if map_id not in (1, 7):
                 self.return_map.addItem(name, map_id)
         return_options.addWidget(self.auto_return_map)
         return_options.addWidget(self.return_map, 1)
@@ -952,7 +994,7 @@ class MainWindow(QMainWindow):
         self.no_quest_farm.setChecked(self.settings.value("farmAfterQuests", False, type=bool))
         self.no_quest_farm_map = QComboBox()
         for map_id, name in MAP_NAMES.items():
-            if map_id != 1:
+            if map_id not in (1, 7):
                 self.no_quest_farm_map.addItem(name, map_id)
         saved_farm_map = self.settings.value("farmAfterQuestsMap", 2, type=int)
         saved_farm_index = self.no_quest_farm_map.findData(saved_farm_map)
@@ -1090,7 +1132,7 @@ class MainWindow(QMainWindow):
         level_controls.addWidget(self.avoid_contested_monsters)
         level_controls.addStretch(1)
         combat_layout.addLayout(level_controls)
-        combat_hint = QLabel("自动模式会搜索并追击当前地图怪物；北部雪地暂无怪物时会沿已验证路线巡逻搜索。")
+        combat_hint = QLabel("自动模式会搜索并追击当前地图怪物；北部雪地无目标时按整图路线巡逻搜索。")
         combat_hint.setObjectName("subtitle")
         combat_layout.addWidget(combat_hint)
         outer.addWidget(combat_card)
@@ -1118,6 +1160,7 @@ class MainWindow(QMainWindow):
         log_layout.addLayout(log_top)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(2500)
         self.log.setMinimumHeight(140)
         self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log.setObjectName("logView")
@@ -1372,6 +1415,28 @@ class MainWindow(QMainWindow):
         for widget in (self.auto_attack, self.auto_potion, self.elite_only, self.attack_button):
             place(box, widget)
         left.addWidget(battle)
+        activities, box = card("秘宝与钓竿")
+        self.activity_resources = QLabel('体力药水 — · 秘宝之石 —')
+        self.activity_resources.setWordWrap(True)
+        box.addWidget(self.activity_resources)
+        self.activity_status = QLabel("等待角色资源数据")
+        self.activity_status.setWordWrap(True)
+        box.addWidget(self.activity_status)
+        self.activity_buttons = {}
+        for action, title, tip in (
+            ('useStaminaPotion', '使用 1 瓶体力恢复药水', '恢复体力；仅在体力不足且有药水时使用'),
+            ('useTreasureStone', '使用 1 颗秘宝之石', '消耗一颗石头，开启一小时通行并进入秘宝之地；离线也计时'),
+            ('enterTreasureLand', '通行期内重返秘宝之地', '已有通行时重入，不消耗新的石头'),
+            ('leaveTreasureLand', '离开秘宝之地回城', '回到主城；通行时间继续计算'),
+            ('useFishingRod', '使用木钓竿前往钓鱼点', '需要背包中有木钓竿；战斗中不可使用，不消耗钓竿'),
+        ):
+            button = QPushButton(title)
+            button.setObjectName('quietButton')
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _checked=False, value=action: self.request_activity(value))
+            box.addWidget(button)
+            self.activity_buttons[action] = button
+        left.addWidget(activities)
         travel, box = card("地图与复活")
         place(box, self.current_map_label)
         self.world_status.setWordWrap(True)
@@ -1491,6 +1556,11 @@ class MainWindow(QMainWindow):
         quest_box.addWidget(task_options)
         self.quest_status.setFixedHeight(24)
         place(quest_box, self.quest_status)
+        self.quest_delivery_button = QPushButton('交付装备任务 · 手动选择装备')
+        self.quest_delivery_button.setObjectName('quietButton')
+        self.quest_delivery_button.setToolTip('选择一条装备交付任务；只有手动确认后才会消耗所选装备')
+        self.quest_delivery_button.clicked.connect(self.open_quest_delivery)
+        quest_box.addWidget(self.quest_delivery_button)
         self.quest_table.verticalHeader().setDefaultSectionSize(44)
         self.quest_table.horizontalHeader().setMinimumHeight(44)
         self.quest_table.setStyleSheet("font-size: 13px;")
@@ -1815,12 +1885,16 @@ class MainWindow(QMainWindow):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_map_buttons()
         self.update_mode_control()
+        self.update_activity_controls()
 
     def log_clear(self) -> None:
         self.log.clear()
 
     def refresh_minimap(self) -> None:
+        if not self.minimap.isVisible():
+            return
         self.minimap.update()
+        self.update_activity_controls()
         if self.current_map is None:
             self.map_activity.setText("等待连接 · 输入 Token 开始探索")
             return
@@ -1830,6 +1904,36 @@ class MainWindow(QMainWindow):
                   "自动战斗 · 搜索目标" if self.auto_attack.isChecked() else "待命")
         self.map_activity.setText(f"{MAP_NAMES.get(self.current_map, self.current_map)}  ·  {action}  ·  "
                                   f"坐标 {self.world_x}, {self.world_y}")
+
+    def schedule_snapshot_ui_refresh(self) -> None:
+        """Coalesce high-rate world snapshots into at most five UI refreshes/sec."""
+        if not self._snapshot_ui_timer.isActive():
+            self._snapshot_ui_timer.start()
+
+    def refresh_snapshot_ui(self) -> None:
+        """Render the latest snapshot once instead of rebuilding widgets per packet."""
+        if not self.world_ready or not self.minimap.isVisible():
+            return
+        self.refresh_character_status()
+        self.update_activity_controls()
+        self.refresh_monster_table()
+        self.update_nearby_players(self.last_peers)
+        self.update_map_buttons()
+        try:
+            mode_index = max(0, min(2, int(self.last_self_state.get("combatMode", 0))))
+            unlock = int(self.last_self_state.get("modeRemaining", 0) or 0)
+        except (TypeError, ValueError):
+            mode_index, unlock = 0, 0
+        self.combat_mode.blockSignals(True)
+        self.combat_mode.setCurrentIndex(mode_index)
+        self.combat_mode.blockSignals(False)
+        self.mode_status.setText(f"当前：{('和平', '战斗', '仇杀')[mode_index]}" +
+                                 (f" · 冷却 {unlock} 秒" if unlock > 0 else "") +
+                                 (f" · 公会 #{self.last_self_state['guildId']}"
+                                  if self.last_self_state.get("guildId") else ""))
+        self.update_mode_control(unlock)
+        self.update_live_telemetry()
+        self.minimap.update()
 
     def apply_theme(self) -> None:
         check_icon = Path(__file__).with_name("assets") / "checkmark.svg"
@@ -1925,6 +2029,7 @@ class MainWindow(QMainWindow):
         if ws is None:
             return
         self.ws = ws
+        self.start_socket_writer(ws)
         self.send_button.setEnabled(True)
         self.disconnect_button.setEnabled(True)
         self.connect_button.setEnabled(False)
@@ -1943,7 +2048,62 @@ class MainWindow(QMainWindow):
         self.reader = threading.Thread(target=self.read_loop, args=(ws,), daemon=True)
         self.reader.start()
 
+    def start_socket_writer(self, ws: MiniWebSocket) -> None:
+        """Keep blocking socket writes off the GUI thread."""
+        outgoing = queue.Queue(maxsize=512)
+        stop = threading.Event()
+        self._writer_queue, self._writer_stop, self._writer_ws = outgoing, stop, ws
+
+        def write_loop() -> None:
+            while not stop.is_set():
+                try:
+                    text = outgoing.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if text is None:
+                    break
+                try:
+                    ws.send_text(text)
+                except Exception as exc:
+                    self.bridge.writer_failed.emit(ws, f"{type(exc).__name__}: {exc}")
+                    ws.close()
+                    break
+
+        self.writer = threading.Thread(target=write_loop, name="game-socket-writer", daemon=True)
+        self.writer.start()
+
+    def stop_socket_writer(self, ws=None) -> None:
+        if ws is not None and ws is not self._writer_ws:
+            return
+        stop, outgoing = self._writer_stop, self._writer_queue
+        self._writer_stop = self._writer_queue = self._writer_ws = None
+        if stop is not None:
+            stop.set()
+        if outgoing is not None:
+            try:
+                outgoing.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def enqueue_socket_text(self, text: str) -> None:
+        outgoing = self._writer_queue
+        if self.ws is not None and self._writer_ws is self.ws and outgoing is not None:
+            try:
+                outgoing.put_nowait(text)
+            except queue.Full as exc:
+                raise WsError("发送队列已满；网络响应过慢，已暂停新的移动帧。") from exc
+            return
+        if self.ws is None:
+            raise WsError("连接已断开")
+        # Keep direct fake sockets usable for offline UI helpers and tests.
+        self.ws.send_text(text)
+
+    def on_writer_failed(self, ws, detail: str) -> None:
+        if self.ws is ws:
+            self.append_log(f"WebSocket 后台发送失败：{detail}")
+
     def on_connect_failed(self) -> None:
+        self.stop_socket_writer()
         self.connection_stable_timer.stop()
         self.keepalive.stop()
         self.reset_world_state()
@@ -2463,6 +2623,7 @@ class MainWindow(QMainWindow):
             approval_data["event"].set()
 
     def finish_signed_login(self, result: dict) -> None:
+        silent = self._batch_login_silent or self._background_login
         self.connect_button.setEnabled(True)
         if not isinstance(result, dict) or not result.get("ok"):
             error = result.get("error", "签名登录失败") if isinstance(result, dict) else "签名登录失败"
@@ -2474,7 +2635,7 @@ class MainWindow(QMainWindow):
             if was_auto_reconnect:
                 self.schedule_auto_reconnect()
                 return
-            if not self._batch_login_silent:
+            if not silent:
                 QMessageBox.warning(self, "签名登录失败", str(error))
             return
         self.session_token = str(result["token"])
@@ -2511,6 +2672,7 @@ class MainWindow(QMainWindow):
             api_path = api_path[:-len("/realtime")]
         api_root = urllib.parse.urlunsplit((scheme, parsed.netloc, api_path, "", ""))
         self.login_preflight_inflight = True
+        login_generation = self._login_generation
         self.connect_button.setEnabled(False)
         self.bridge.state.emit("正在读取角色资料…")
 
@@ -2525,7 +2687,8 @@ class MainWindow(QMainWindow):
                     payload = json.loads(response.read().decode("utf-8"))
                     if response.status != 200 or not isinstance(payload, dict):
                         raise RuntimeError("服务端返回了无法识别的角色资料")
-                self.bridge.profile.emit({"loginPreflight": True, "player": payload})
+                self.bridge.profile.emit({"loginPreflight": True, "loginPreflightGeneration": login_generation,
+                                          "player": payload})
             except urllib.error.HTTPError as exc:
                 try:
                     detail_payload = json.loads(exc.read().decode("utf-8", "replace"))
@@ -2533,9 +2696,12 @@ class MainWindow(QMainWindow):
                     detail_payload = {}
                 detail = (detail_payload.get("message") or detail_payload.get("error")
                           or detail_payload.get("code") or f"HTTP {exc.code}")
-                self.bridge.profile.emit({"loginPreflight": True, "loginPreflightError": str(detail)})
+                self.bridge.profile.emit({"loginPreflight": True,
+                                          "loginPreflightGeneration": login_generation,
+                                          "loginPreflightError": str(detail)})
             except Exception as exc:
                 self.bridge.profile.emit({"loginPreflight": True,
+                                          "loginPreflightGeneration": login_generation,
                                           "loginPreflightError": f"{type(exc).__name__}: {exc}"})
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2588,8 +2754,8 @@ class MainWindow(QMainWindow):
         if not text:
             return
         try:
-            ws.send_text(text)
-            self.append_log("SEND text: " + text)
+            self.enqueue_socket_text(text)
+            self.append_log("已加入 WebSocket 发送队列：" + text)
         except Exception as exc:
             self.append_log(f"发送失败：{type(exc).__name__}: {exc}")
 
@@ -2603,6 +2769,7 @@ class MainWindow(QMainWindow):
         self.keepalive.stop()
         self.position_sync_timer.stop()
         ws, self.ws = self.ws, None
+        self.stop_socket_writer(ws)
         if ws:
             ws.close()
         self.send_button.setEnabled(False)
@@ -2613,6 +2780,9 @@ class MainWindow(QMainWindow):
         self.update_map_buttons()
 
     def reset_world_state(self) -> None:
+        self.cancel_map_path_request()
+        self.pending_world_entry = False
+        self.login_preflight_inflight = False
         if hasattr(self, "telemetry_timer"):
             self.telemetry_timer.stop()
         if hasattr(self, "move_timer"):
@@ -2657,7 +2827,12 @@ class MainWindow(QMainWindow):
         self.movement_corrections = 0
         self.last_move_at = None
         self.player_id = None
+        self._activity_pending = None
+        self._treasure_access_until = 0.0
+        self._delivery_submit_pending = False
         self.monsters = {}
+        self.monsters_by_map = {}
+        self._monster_index_source = self.monsters
         self.last_self_state = {}
         self.last_progress_state = {}
         self._fatigue_exhaustion_handled = False
@@ -2692,6 +2867,8 @@ class MainWindow(QMainWindow):
         self.patrol_anchor = None
         self.patrol_direction_index = 0
         self.patrol_ring = 320.0
+        self.patrol_sweep_row = 0
+        self.patrol_sweep_direction = 1
         self.auto_route_retry_count = 0
         self.auto_potion_pending = False
         self.combat_stats = {"kills": 0, "damage": 0, "hits": 0, "potions": 0}
@@ -2729,11 +2906,15 @@ class MainWindow(QMainWindow):
             button.setEnabled(ready and map_id != self.current_map)
             route = map_id in MAP_ROUTES.get(self.current_map, ())
             button.setText(f"{map_id}  {MAP_NAMES[map_id].split(' · ')[-1]}")
-            button.setProperty("currentMap", map_id == self.current_map)
-            style = QApplication.style()
-            style.unpolish(button)
-            style.polish(button)
-            button.setToolTip(MAP_NAMES[map_id] + (" · 相邻入口" if route else ""))
+            current = map_id == self.current_map
+            if button.property("currentMap") != current:
+                button.setProperty("currentMap", current)
+                style = QApplication.style()
+                style.unpolish(button)
+                style.polish(button)
+            tooltip = MAP_NAMES[map_id] + (" · 相邻入口" if route else "")
+            if button.toolTip() != tooltip:
+                button.setToolTip(tooltip)
         if self.current_map is None:
             self.current_map_label.setText("等待进入地图")
             self.current_map_label.setToolTip("")
@@ -2768,6 +2949,15 @@ class MainWindow(QMainWindow):
 
     def accept_packet(self, packet: dict) -> None:
         kind = packet.get("type")
+        if self.accept_activity_packet(packet):
+            return
+        if kind == 'economy':
+            for key in ('gold', 'townStones', 'atonementStones', 'bossTickets'):
+                if key in packet:
+                    self.last_self_state[key] = packet[key]
+            self.accept_activity_resources(packet, packet.get('serverTime'))
+            self.schedule_snapshot_ui_refresh()
+            return
         if kind == "pong":
             self.last_pong_received_at = time.monotonic()
             try:
@@ -2786,6 +2976,9 @@ class MainWindow(QMainWindow):
             self.bridge.state.emit("服务器拒绝登录凭证…")
             self.append_log("服务端拒绝游戏会话 Token：login_required。")
         elif kind == "welcome" and isinstance(packet.get("position"), dict):
+            if self._activity_pending and self._activity_pending[0] == 'useFishingRod':
+                self._activity_pending = None
+                self.activity_status.setText('服务器已确认钓竿传送位置。')
             self.welcome_at = time.monotonic()
             position = packet["position"]
             self.set_current_map(position.get("map", 1))
@@ -2797,9 +2990,11 @@ class MainWindow(QMainWindow):
         elif kind == "snapshot" and self.current_map is not None:
             operation = str(packet.get("action", "snapshot"))
             progress = packet.get("progress")
-            if isinstance(progress, dict):
+            progress_changed = isinstance(progress, dict) and progress != self.last_progress_state
+            if progress_changed:
                 self.last_progress_state = dict(progress)
-            if isinstance(progress, dict) and isinstance(progress.get("quests"), list):
+            if (progress_changed and isinstance(progress, dict)
+                    and isinstance(progress.get("quests"), list)):
                 self.update_quests(progress["quests"])
             self_state = packet.get("self")
             detected_death = False
@@ -2811,6 +3006,7 @@ class MainWindow(QMainWindow):
                     self.last_self_state.clear()
                 self.last_self_state.update(self_state)
                 self_state = self.last_self_state
+                self.accept_activity_resources(self_state, packet.get('serverTime'))
                 current_potions = self_state.get("healthPotions")
                 if isinstance(previous_potions, (int, float)) and isinstance(current_potions, (int, float)):
                     used = max(0, int(previous_potions) - int(current_potions))
@@ -2829,22 +3025,8 @@ class MainWindow(QMainWindow):
                     self_state["dead"] = False
                 self.server_dead = bool(self_state.get("dead", False))
                 if hasattr(self, "combat_mode") and "combatMode" in self_state:
-                    try:
-                        mode_index = max(0, min(2, int(self_state.get("combatMode", 0))))
-                    except (TypeError, ValueError):
-                        mode_index = 0
-                    self.combat_mode.blockSignals(True)
-                    self.combat_mode.setCurrentIndex(mode_index)
-                    self.combat_mode.blockSignals(False)
-                    try:
-                        unlock = int(self_state.get("modeRemaining", 0) or 0)
-                    except (TypeError, ValueError):
-                        unlock = 0
-                    self.mode_status.setText(f"当前：{('和平', '战斗', '仇杀')[mode_index]}" +
-                                             (f" · 冷却 {unlock} 秒" if unlock > 0 else "") +
-                                             (f" · 公会 #{self_state['guildId']}" if self_state.get("guildId") else ""))
-                    self.update_mode_control(unlock)
-                self.refresh_character_status()
+                    self.schedule_snapshot_ui_refresh()
+                self.schedule_snapshot_ui_refresh()
                 self.handle_fatigue_state(self_state)
                 if self.manual_disconnect:
                     return
@@ -2888,7 +3070,7 @@ class MainWindow(QMainWindow):
                 self.life = int(self_state["life"])
             if isinstance(self_state, dict) and isinstance(self_state.get("nextAttack"), dict):
                 self.accept_attack_ticket(self_state["nextAttack"])
-            self.update_monsters(packet)
+            self.update_monsters(packet, render=False)
             for reward in packet.get("rewards", []):
                 if isinstance(reward, dict) and reward.get("EncounterID"):
                     encounter_id = str(reward["EncounterID"])
@@ -2914,7 +3096,7 @@ class MainWindow(QMainWindow):
                 if self.questless_farm_mode:
                     QTimer.singleShot(500, self.continue_quest_map_travel)
                 self.refresh_social_data()
-            self.update_map_buttons()
+            self.schedule_snapshot_ui_refresh()
             if detected_death:
                 self.travel_status.setText("检测到角色阵亡，正在自动请求回到城镇…")
                 QTimer.singleShot(0, self.request_respawn)
@@ -2923,9 +3105,6 @@ class MainWindow(QMainWindow):
                 self.merge_nearby_players(peers)
             else:
                 self.expire_nearby_players()
-            self.update_nearby_players(self.last_peers)
-            self.minimap.update()
-            self.update_live_telemetry()
         elif kind == "travel_result":
             self.move_timer.stop()
             self.stop_chase()
@@ -3206,6 +3385,100 @@ class MainWindow(QMainWindow):
         if (request_next and not active and hasattr(self, "auto_quest")
                 and self.auto_quest.isChecked() and not self.questless_farm_mode):
             self.accept_next_monster_quest()
+
+    def open_quest_delivery(self) -> None:
+        if getattr(self, '_delivery_dialog', None) is not None and self._delivery_dialog.isVisible():
+            self._delivery_dialog.raise_()
+            return
+        row = self.quest_table.currentRow()
+        if row < 0 or row >= len(self.latest_quests) or not self.get_session_token():
+            self.quest_status.setText('请先登录，并在任务列表中选择要交付装备的任务。')
+            return
+        quest = self.latest_quests[row]
+        if not quest.get('accepted') or quest.get('completed') or quest.get('objectiveType') == 'MONSTER':
+            self.quest_status.setText('请选择已接取、未完成的装备交付任务。')
+            return
+        quest_id = quest.get('id', quest.get('questId'))
+        try:
+            quest_id = int(quest_id)
+        except (ValueError, TypeError):
+            return
+        if not self.quest_delivery_button.isEnabled():
+            return
+        self._delivery_requested_id = quest_id
+        self.quest_delivery_button.setEnabled(False)
+        self.request_social_api('questDelivery', f'/quests/delivery/{quest_id}')
+
+    def show_quest_delivery(self, data: dict) -> None:
+        quest = data.get('quest', {})
+        if not isinstance(quest, dict) or not quest:
+            self.quest_status.setText('服务器未提供可交付任务，请刷新任务后重试。')
+            return
+        target = int(quest.get('target', 0))
+        quest_id = self._delivery_requested_id
+        if target <= 0:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('交付装备任务')
+        dialog.resize(640, 520)
+        layout = QVBoxLayout(dialog)
+        warning = QLabel(f'需要选择 {target} 件装备。点击确认后所选装备将被消耗，并领取任务奖励。')
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        choices = QVBoxLayout(content)
+        checks = []
+        for item in data.get('items', []):
+            if (not isinstance(item, dict) or item.get('playerItemId') is None
+                    or any(item.get(flag) for flag in ('equipped', 'locked', 'listed', 'isLocked', 'isListed'))):
+                continue
+            check = QCheckBox(f"{localized_item_name(item)} · #{item['playerItemId']} · " + ' / '.join(equipment_attribute_lines(item)))
+            checks.append((check, item['playerItemId']))
+            choices.addWidget(check)
+        choices.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        counter = QLabel()
+        layout.addWidget(counter)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        confirm = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        confirm.setText('确认消耗所选装备并交付')
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def selection_changed():
+            selected = sum(check.isChecked() for check, _ in checks)
+            counter.setText(f'已选择 {selected}/{target} 件')
+            confirm.setEnabled(selected == target)
+            for check, _ in checks:
+                check.setEnabled(check.isChecked() or selected < target)
+
+        for check, _ in checks:
+            check.toggled.connect(selection_changed)
+        selection_changed()
+
+        def deliver():
+            if self._delivery_submit_pending:
+                return
+            item_ids = [item_id for check, item_id in checks if check.isChecked()]
+            if len(item_ids) != target:
+                return
+            confirm.setEnabled(False)
+            self._delivery_submit_pending = True
+            counter.setText('正在提交交付；请等待服务器确认。')
+            self.request_social_api('questDeliver', '/quests/deliver', 'POST',
+                                    {'questId': quest_id,
+                                     'runNumber': int(quest.get('runNumber', 0)), 'itemIds': item_ids})
+
+        confirm.clicked.connect(deliver)
+        self._delivery_dialog = dialog
+        self._delivery_confirm = confirm
+        self._delivery_status = counter
+        self.quest_delivery_button.setEnabled(False)
+        dialog.finished.connect(lambda _result: self.quest_delivery_button.setEnabled(not self._delivery_submit_pending))
+        dialog.show()
 
     def on_no_quest_farm_changed(self, enabled: bool) -> None:
         self.settings.setValue("farmAfterQuests", enabled)
@@ -3512,7 +3785,7 @@ class MainWindow(QMainWindow):
                 continue
             if item.get("equipped"):
                 equipped_by_slot[slot] = item
-            elif item.get("playerItemId") is not None:
+            elif item.get("playerItemId") is not None and self.equipment_matches_class(item):
                 by_slot.setdefault(slot, []).append(item)
         for slot, candidates in by_slot.items():
             current = equipped_by_slot.get(slot)
@@ -3572,6 +3845,10 @@ class MainWindow(QMainWindow):
                 template = QUALITY_LARK_TEMPLATES.get(quality_code, "green")
                 self.send_lark_notification("装备掉落", detail, template, "equipment")
         self._known_equipment_ids = set(current)
+
+    def equipment_matches_class(self, item: dict) -> bool:
+        required = str(item.get('requiredClass') or '').upper()
+        return not required or required == self.current_character_class()
 
     def has_active_monster_quest(self) -> bool:
         for quest in self.latest_quests:
@@ -3960,7 +4237,7 @@ class MainWindow(QMainWindow):
 
     def maybe_prompt_character_creation(self) -> None:
         if (not self.character_creation_required or self.character_creation_prompted
-                or self.character_creation_inflight):
+                or self.character_creation_inflight or self._batch_login_silent or self._background_login):
             return
         can_prompt = getattr(self, "can_prompt_character_creation", None)
         if callable(can_prompt) and not can_prompt():
@@ -3971,6 +4248,12 @@ class MainWindow(QMainWindow):
     def show_character_creation_dialog(self) -> None:
         if not self.character_creation_required or self.character_creation_inflight:
             return
+        if self.sender() is not self.create_character_button:
+            can_prompt = getattr(self, 'can_prompt_character_creation', None)
+            if (self._batch_login_silent or self._background_login
+                    or (callable(can_prompt) and not can_prompt())):
+                self.character_creation_prompted = False
+                return
         dialog = QDialog(self)
         dialog.setWindowTitle("创建游戏角色")
         dialog.setMinimumWidth(390)
@@ -3990,6 +4273,7 @@ class MainWindow(QMainWindow):
         class_combo = QComboBox()
         class_combo.addItem("战士 · 攻击成长较高", "WARRIOR")
         class_combo.addItem("守卫 · 生命与恢复较高", "GUARD")
+        class_combo.addItem("弓手 · 远程攻击", "ARCHER")
         layout.addWidget(class_label)
         layout.addWidget(class_combo)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
@@ -4086,6 +4370,8 @@ class MainWindow(QMainWindow):
 
     def accept_profile_data(self, data: dict) -> None:
         if isinstance(data, dict) and data.get("loginPreflight"):
+            if data.get("loginPreflightGeneration") != self._login_generation:
+                return
             self.login_preflight_inflight = False
             self.connect_button.setEnabled(True)
             if data.get("loginPreflightError"):
@@ -4100,6 +4386,8 @@ class MainWindow(QMainWindow):
             self.api_profile = player if isinstance(player, dict) else {}
             if profile_needs_character_creation(self.api_profile):
                 self.character_creation_required = True
+                self._auto_reconnect_login = False
+                self.reconnect_timer.stop()
                 self.create_character_button.setText("创建角色")
                 self.create_character_button.setToolTip("服务端确认这个钱包还没有游戏角色")
                 self.create_character_button.setEnabled(True)
@@ -4148,7 +4436,27 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "创建角色失败", detail)
             return
         if isinstance(data, dict) and data.get("socialApiKey"):
+            if data.get('socialApiLoginGeneration', self._login_generation) != self._login_generation:
+                return
             key = str(data["socialApiKey"])
+            if key == 'questDelivery':
+                self.quest_delivery_button.setEnabled(True)
+                if data.get('socialApiError'):
+                    self.quest_status.setText('读取交付任务失败：' + str(data['socialApiError']))
+                else:
+                    self.show_quest_delivery(data.get('socialApiResult', {}))
+                return
+            if key == 'questDeliver':
+                self._delivery_submit_pending = False
+                self.quest_delivery_button.setEnabled(True)
+                result = data.get('socialApiResult', {})
+                if isinstance(result, dict) and result.get('delivered'):
+                    self.quest_status.setText('服务器确认交付成功，正在刷新奖励和背包。')
+                    self._delivery_dialog.accept()
+                    self.refresh_profile_data(force=True)
+                else:
+                    self._delivery_status.setText('交付未确认成功，请关闭窗口并刷新任务及库存后重新选择。')
+                return
             if key == "equip":
                 self._auto_equip_pending_id = None
             if data.get("socialApiError"):
@@ -4298,16 +4606,22 @@ class MainWindow(QMainWindow):
         class_display = CHARACTER_NAMES_ZH.get(str(character_class).upper(), character_class)
         if hasattr(self, "character_portrait"):
             class_code = str(character_class).upper()
-            kind = {"GUARD": "guard", "WARRIOR": "warrior"}.get(class_code)
-            sprite = (QPixmap(str(Path(__file__).with_name("assets") / (kind + "-idle.webp")))
-                      if kind else QPixmap())
-            if not sprite.isNull():
-                # Guard idle is a horizontal strip; the warrior asset is one frame.
-                frame = sprite.copy(0, 0, min(sprite.width(), sprite.height()), sprite.height())
+            kind = {"GUARD": "guard", "WARRIOR": "warrior", "ARCHER": "archer"}.get(class_code)
+            if kind not in self._portrait_pixmap_cache:
+                sprite = (QPixmap(str(Path(__file__).with_name("assets") / (kind + ("-idle.png" if kind == "archer" else "-idle.webp"))))
+                          if kind else QPixmap())
+                if not sprite.isNull():
+                    frame = sprite.copy(0, 0, min(sprite.width(), sprite.height()), sprite.height())
+                    self._portrait_pixmap_cache[kind] = frame.scaled(
+                        82, 108, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                else:
+                    self._portrait_pixmap_cache[kind] = QPixmap()
+            portrait = self._portrait_pixmap_cache[kind]
+            if not portrait.isNull():
                 self.character_portrait.setText("")
                 self.character_portrait.setStyleSheet("background:transparent;border:0;")
-                self.character_portrait.setPixmap(frame.scaled(82, 108, Qt.AspectRatioMode.KeepAspectRatio,
-                                                               Qt.TransformationMode.SmoothTransformation))
+                self.character_portrait.setPixmap(portrait)
                 self.character_portrait.setToolTip(f"{class_display} · 游戏原始待机素材")
             else:
                 self.character_portrait.clear()
@@ -4431,7 +4745,7 @@ class MainWindow(QMainWindow):
         nearest = None
         if self.world_x is not None and self.world_y is not None:
             candidates = []
-            for encounter_id, monster in self.monsters.items():
+            for encounter_id, monster in self.monsters_on_current_map().items():
                 if not isinstance(monster, dict):
                     continue
                 try:
@@ -4526,6 +4840,16 @@ class MainWindow(QMainWindow):
         return urllib.parse.urlunsplit((scheme, parsed.netloc, api_path, "", ""))
 
     def request_social_api(self, key: str, path: str, method: str = "GET", body: dict | None = None) -> None:
+        if key == 'equip' and body:
+            item = next((item for item in self.api_equipment.get('items', [])
+                         if str(item.get('playerItemId')) == str(body.get('playerItemId'))), None)
+            if item is not None and not self.equipment_matches_class(item):
+                self._auto_equip_pending_id = None
+                self.inventory_action_status.setText('该装备不适用于当前职业。')
+                return
+            if item is not None and str(item.get('slotType', '')).upper() == 'OTHER':
+                self.inventory_action_status.setText('道具请使用对应玩法按钮，不作为装备穿戴。')
+                return
         token = self.get_session_token()
         root = self._api_root()
         if not token or not root:
@@ -4533,8 +4857,10 @@ class MainWindow(QMainWindow):
                 self.balance_label.setText("TABBY 余额：请先连接账号")
             return
 
+        login_generation = self._login_generation
+
         def worker() -> None:
-            result = {"socialApiKey": key}
+            result = {"socialApiKey": key, 'socialApiLoginGeneration': login_generation}
             try:
                 encoded = json.dumps(body).encode("utf-8") if body is not None else None
                 headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
@@ -4610,11 +4936,13 @@ class MainWindow(QMainWindow):
         row = self.social_inventory_table.currentRow()
         item_cell = self.social_inventory_table.item(row, 0) if row >= 0 else None
         item = item_cell.data(Qt.ItemDataRole.UserRole) if item_cell else None
-        self.equip_item_button.setEnabled(isinstance(item, dict))
+        self.equip_item_button.setEnabled(isinstance(item, dict) and self.equipment_matches_class(item))
         self.equip_item_button.setText(
             ("卸下 " if item.get("equipped") else "装备 ") + localized_item_name(item)
             if isinstance(item, dict) else "选择物品后装备"
         )
+        if isinstance(item, dict) and item.get('itemCode') in ACTIVITY_ITEM_ACTIONS:
+            self.equip_item_button.setText('使用 ' + localized_item_name(item))
         if isinstance(item, dict):
             quality = str(item.get("qualityCode", "L1"))
             self.selected_item_name.setText(localized_item_name(item))
@@ -4641,6 +4969,9 @@ class MainWindow(QMainWindow):
         item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         if not isinstance(item, dict):
             self.inventory_action_status.setText("先从背包列表选择一件装备。")
+            return
+        if item.get('itemCode') in ACTIVITY_ITEM_ACTIONS:
+            self.request_activity(ACTIVITY_ITEM_ACTIONS[item['itemCode']])
             return
         if item.get("equipped"):
             self.request_social_api("unequip", "/equipment/unequip", "POST",
@@ -4776,7 +5107,9 @@ class MainWindow(QMainWindow):
                 quality = str(item.get("qualityCode", "—"))
                 rows.append([localized_item_name(item), SLOT_NAMES_ZH.get(slot.upper(), slot),
                              QUALITY_NAMES_ZH.get(quality.upper(), quality), str(item.get("quantity", 1)), quality, item])
-        for key, name in (("healthPotions", "生命药水"), ("bossTickets", "遗迹入场券"), ("atonementStones", "赎罪石")):
+        for key, name in (("healthPotions", "生命药水"), ("bossTickets", "遗迹入场券"),
+                          ("atonementStones", "赎罪石"), ("staminaPotions", "体力恢复药水"),
+                          ("treasureStones", "秘宝之石")):
             count = self.last_self_state.get(key)
             if isinstance(count, (int, float)) and count > 0:
                 rows.append([name, "消耗品", "—", str(int(count)), "", None])
@@ -4813,7 +5146,7 @@ class MainWindow(QMainWindow):
         row = self.backpack_table.currentRow()
         cell = self.backpack_table.item(row, 0) if row >= 0 else None
         item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
-        self.backpack_equip_button.setEnabled(isinstance(item, dict))
+        self.backpack_equip_button.setEnabled(isinstance(item, dict) and self.equipment_matches_class(item))
         selected_rows = sorted({index.row() for index in self.backpack_table.selectionModel().selectedRows()})
         selected_items = []
         for selected_row in selected_rows:
@@ -5003,6 +5336,9 @@ class MainWindow(QMainWindow):
         item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
         if not isinstance(item, dict) or item.get("equipped"):
             return
+        if item.get('itemCode') in ACTIVITY_ITEM_ACTIONS:
+            self.request_activity(ACTIVITY_ITEM_ACTIONS[item['itemCode']])
+            return
         player_item_id = item.get("playerItemId")
         if player_item_id is None:
             self.backpack_status.setText("物品记录缺少 playerItemId，无法安全装备。")
@@ -5010,7 +5346,7 @@ class MainWindow(QMainWindow):
         self.request_social_api("equip", "/equipment/equip", "POST", {"playerItemId": player_item_id})
         self.backpack_status.setText("装备请求已发送，等待服务端确认…")
 
-    def update_monsters(self, packet: dict) -> None:
+    def update_monsters(self, packet: dict, *, render: bool = True) -> None:
         rows = packet.get("monsters", [])
         if not isinstance(rows, list):
             return
@@ -5020,32 +5356,67 @@ class MainWindow(QMainWindow):
         # rows absent from the frame.
         compact = int(packet.get("deltaVersion", 0)) == 2
         is_delta = bool(packet.get("delta", False))
-        cache = dict(self.monsters) if is_delta else {}
+        cache = self.monsters if is_delta else {}
+        if not is_delta:
+            self.monsters_by_map = {}
+            self._monster_index_source = cache
         for removed in packet.get("removedMonsters", []):
-            cache.pop(str(removed), None)
+            encounter_id = str(removed)
+            old = cache.pop(encounter_id, None)
+            if isinstance(old, dict):
+                bucket = self.monsters_by_map.get(self.monster_map_id(old))
+                if bucket is not None:
+                    bucket.pop(encounter_id, None)
         present_ids = set()
         for row in rows:
             if not isinstance(row, dict) or not row.get("encounterId"):
                 continue
             encounter_id = str(row["encounterId"])
             present_ids.add(encounter_id)
-            merged = dict(cache.get(encounter_id, {}))
+            old = cache.get(encounter_id, {})
+            merged = dict(old)
             merged.update(row)
             cache[encounter_id] = merged
+            old_map = self.monster_map_id(old) if old else None
+            new_map = self.monster_map_id(merged)
+            if old_map != new_map and old_map in self.monsters_by_map:
+                self.monsters_by_map[old_map].pop(encounter_id, None)
+            self.monsters_by_map.setdefault(new_map, {})[encounter_id] = merged
             if encounter_id not in self.seen_monsters and int(merged.get("health", 0)) > 0:
                 self.seen_monsters.add(encounter_id)
                 self.append_log(f"发现怪物：{localized_monster_name(merged)} · {encounter_id[:8]} · 地图 {merged.get('mapId', '?')}")
         if not compact:
             cache = {key: value for key, value in cache.items() if key in present_ids}
+            self.monsters_by_map = {}
+            for encounter_id, monster in cache.items():
+                self.monsters_by_map.setdefault(self.monster_map_id(monster), {})[encounter_id] = monster
         self.monsters = cache
-        self.refresh_monster_table()
-        self.update_live_telemetry()
+        self._monster_index_source = self.monsters
+        if render:
+            self.refresh_monster_table()
+            self.update_live_telemetry()
+
+    def monster_map_id(self, monster: dict) -> int:
+        try:
+            return int(monster.get("mapId", self.current_map or -1))
+        except (TypeError, ValueError):
+            return int(self.current_map or -1)
+
+    def monsters_on_current_map(self) -> dict:
+        """Return the current map bucket, rebuilding only after external cache replacement."""
+        if getattr(self, "_monster_index_source", None) is not self.monsters:
+            index = {}
+            for encounter_id, monster in self.monsters.items():
+                if isinstance(monster, dict):
+                    index.setdefault(self.monster_map_id(monster), {})[encounter_id] = monster
+            self.monsters_by_map = index
+            self._monster_index_source = self.monsters
+        return self.monsters_by_map.get(self.current_map, {})
 
     def refresh_monster_table(self) -> None:
         selected = self.selected_monster_id()
-        visible = [(encounter_id, monster) for encounter_id, monster in self.monsters.items()
-                   if int(monster.get("mapId", self.current_map or -1)) == self.current_map
-                   and int(monster.get("health", 0)) > 0]
+        visible = [(encounter_id, monster) for encounter_id, monster in self.monsters_on_current_map().items()
+                   if int(monster.get("health", 0)) > 0]
         visible.sort(key=lambda item: self.monster_distance(item[1]))
         self.monster_table.blockSignals(True)
         self.monster_table.setRowCount(len(visible))
@@ -5169,6 +5540,14 @@ class MainWindow(QMainWindow):
         if encounter_id:
             self.attack_monster(encounter_id)
 
+    def current_character_class(self) -> str:
+        return str(self.last_self_state.get('characterClass') or self.api_profile.get('characterClass')
+                   or self.api_profile.get('class') or 'WARRIOR').upper()
+
+    def attack_reach(self, *, impact: bool = False) -> float:
+        # Official client uses 310 for archers; preserve sync margin for local chasing.
+        return (310.0 if impact else 295.0) if self.current_character_class() == 'ARCHER' else (60.0 if impact else 55.0)
+
     def attack_monster(self, encounter_id: str) -> bool:
         monster = self.monsters.get(encounter_id)
         if monster is not None and not self.monster_matches_level_range(monster):
@@ -5187,8 +5566,8 @@ class MainWindow(QMainWindow):
             self.combat_status.setText("目标已消失或游戏会话尚未就绪。")
             return False
         distance = self.monster_distance(monster)
-        if distance > 55:
-            self.combat_status.setText(f"目标距离 {distance:.0f}，需先靠近到 55 单位以内以留出位置同步余量。")
+        if distance > self.attack_reach():
+            self.combat_status.setText(f"目标距离 {distance:.0f}，需先靠近到 {self.attack_reach():.0f} 单位以内。")
             return False
         ticket = str(self.next_attack.get("id", ""))
         if not ticket or ticket in self.used_attack_tickets:
@@ -5197,9 +5576,12 @@ class MainWindow(QMainWindow):
         if time.monotonic() < self.attack_busy_until:
             return False
         critical = bool(self.next_attack.get("critical", False))
+        dx = float(monster.get('x', self.world_x)) - float(self.world_x)
+        dy = float(monster.get('y', self.world_y)) - float(self.world_y)
+        self.attack_elevation = (-1 if dy < 0 else 1) if abs(dy) > max(12.0, abs(dx) * 0.4142) else 0
         sync = {"action": "sync", "movementRevision": self.movement_revision,
                 "map": self.current_map, "x": self.world_x, "y": self.world_y,
-                "animation": "attack", "attackCritical": critical,
+                "animation": "attack", "attackCritical": critical, "attackElevation": self.attack_elevation,
                 "flip": float(monster.get("x", self.world_x)) < float(self.world_x)}
         try:
             self.send_game_packet(sync)
@@ -5209,6 +5591,7 @@ class MainWindow(QMainWindow):
         self.used_attack_tickets.add(ticket)
         self.last_attack_ticket = ticket
         impact_delay, animation_duration, speed_multiplier = self.attack_timing(critical)
+        self._attack_animation_end = time.monotonic() + animation_duration
         self.attack_busy_until = time.monotonic() + max(0.62 / speed_multiplier, animation_duration) + 0.06
         self.last_attacked_monster = encounter_id
         self.set_combat_feedback(
@@ -5228,13 +5611,12 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             speed_percent = 0.0
         speed_multiplier = 1.2 * min(2.0, max(1.0, 1.0 + speed_percent / 100.0))
-        # Mirror Wanderer.update_attack(): the default warrior uses the
-        # 0.11-second normal strip (impact frame 4) and warrior_attack2 for
-        # criticals (0.88/12-second frames, impact frame 5).
-        frame_duration = ((0.88 / 12.0) if critical else 0.11) / speed_multiplier
-        impact_frame = 5 if critical else 4
+        # Published 2026-10-25 skins use attack1/attack2 timing. Archer impact
+        # is frame 7 sideways/up, frame 5 downward.
+        frame_duration = (0.88 / 12.0) / speed_multiplier
+        impact_frame = (5 if getattr(self, 'attack_elevation', 0) == 1 else 7) if self.current_character_class() == 'ARCHER' else 5
         impact_delay_ms = round(frame_duration * impact_frame * 1000)
-        animation_duration = frame_duration * 7
+        animation_duration = frame_duration * 12
         return impact_delay_ms, animation_duration, speed_multiplier
 
     def send_monster_attack(self, encounter_id: str, ticket: str, generation: int | None = None) -> None:
@@ -5244,7 +5626,7 @@ class MainWindow(QMainWindow):
         if (monster is None or int(monster.get("health", 0)) <= 0
                 or int(monster.get("mapId", self.current_map or -1)) != self.current_map
                 or not self.monster_matches_level_range(monster)
-                or self.monster_distance(monster) > 60):
+                or self.monster_distance(monster) > self.attack_reach(impact=True)):
             self.invalid_target_until[encounter_id] = time.monotonic() + 3.0
             self.used_attack_tickets.discard(ticket)
             if self.last_attack_ticket == ticket:
@@ -5255,14 +5637,17 @@ class MainWindow(QMainWindow):
             self.send_game_packet({"action": "monsterAttack", "encounterId": encounter_id,
                                    "attackTicket": ticket, "queuedAt": int(time.monotonic() * 1000)})
             session = self.combat_generation
-            QTimer.singleShot(550, lambda: self.send_idle_after_attack(session))
+            idle_delay = max(0, round((getattr(self, '_attack_animation_end', time.monotonic()) - time.monotonic()) * 1000))
+            QTimer.singleShot(idle_delay, lambda: self.send_idle_after_attack(session, ticket))
         except Exception as exc:
             self.used_attack_tickets.discard(ticket)
             if self.last_attack_ticket == ticket:
                 self.last_attack_ticket = None
             self.combat_status.setText(f"攻击帧发送失败：{type(exc).__name__}: {exc}")
 
-    def send_idle_after_attack(self, generation: int | None = None) -> None:
+    def send_idle_after_attack(self, generation: int | None = None, ticket: str | None = None) -> None:
+        if ticket is not None and ticket != self.last_attack_ticket:
+            return
         if self.ws is None or not self.world_ready or self.pending_destination is not None or (generation is not None and generation != self.combat_generation):
             return
         try:
@@ -5313,8 +5698,10 @@ class MainWindow(QMainWindow):
             return
         if self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending or self.pending_destination is not None:
             return
+        if self.manual_move_active:
+            return
         eligible_monsters = [(self.monster_distance(monster), encounter_id, monster)
-                              for encounter_id, monster in self.monsters.items()
+                              for encounter_id, monster in self.monsters_on_current_map().items()
                               if int(monster.get("mapId", -1)) == self.current_map
                               and int(monster.get("health", 0)) > 0
                               and self.monster_matches_active_quest(monster)
@@ -5325,17 +5712,25 @@ class MainWindow(QMainWindow):
         candidates = [(distance, encounter_id) for distance, encounter_id, monster in eligible_monsters
                       if self.monster_is_uncontested(monster)]
         if not candidates:
+            if (isinstance(self._pending_path_request, dict)
+                    and self._pending_path_request.get("kind") == "chase"):
+                self.stop_chase()
             if self.chase_target is not None:
                 self.stop_chase()
             if eligible_monsters and self.avoid_contested_monsters.isChecked():
-                self.combat_status.setText("附近可见怪物周围都有其他玩家，正在搜索更空闲的位置。")
+                self.combat_status.setText("已发现的怪物附近都有其他玩家，正在巡逻搜索空闲区域。")
             if not self.patrol_timer.isActive() and time.monotonic() >= self.patrol_retry_after:
                 self.start_patrol()
             return
 
         # A newly observed target always interrupts the search route.
+        if self._pending_path_request is not None:
+            if self._pending_path_request.get("kind") == "patrol":
+                self.stop_patrol(reset_anchor=True)
+            else:
+                return
         self.stop_patrol(reset_anchor=True)
-        nearby = [(distance, encounter_id) for distance, encounter_id in candidates if distance <= 55]
+        nearby = [(distance, encounter_id) for distance, encounter_id in candidates if distance <= self.attack_reach()]
         if nearby:
             self.stop_chase()
             _, encounter_id = min(nearby)
@@ -5384,6 +5779,127 @@ class MainWindow(QMainWindow):
     def release_auto_potion_request(self) -> None:
         self.auto_potion_pending = False
 
+    def fishing_rod(self) -> dict | None:
+        return next((item for item in self.api_equipment.get('items', [])
+                     if isinstance(item, dict) and item.get('itemCode') == 'WOODEN_FISHING_ROD'
+                     and item.get('playerItemId') is not None), None)
+
+    def accept_activity_resources(self, data: dict, server_time=None) -> None:
+        for key in ('staminaPotions', 'treasureStones', 'treasureExpiresAt'):
+            if key in data:
+                self.last_self_state[key] = data[key]
+        expires = data.get('treasureExpiresAt', data.get('expiresAt'))
+        if expires is not None and server_time is not None:
+            try:
+                self._treasure_access_until = time.monotonic() + max(0.0, (float(expires) - float(server_time)) / 1000)
+            except (TypeError, ValueError):
+                pass
+
+    def update_activity_controls(self) -> None:
+        if not hasattr(self, 'activity_buttons'):
+            return
+        if self._activity_pending and time.monotonic() - self._activity_pending[1] > 10:
+            self._activity_pending = None
+            self.activity_status.setText('操作结果等待超时；请核对库存后重试。')
+        ready = bool(self.ws is not None and self.world_ready and not self.server_dead
+                     and not self.respawn_pending and self.pending_destination is None and not self._activity_pending)
+        remaining = max(0, math.ceil(self._treasure_access_until - time.monotonic()))
+        stones = int(self.last_self_state.get('treasureStones', 0) or 0)
+        potions = int(self.last_self_state.get('staminaPotions', 0) or 0)
+        stamina = float((self.last_self_state.get('farming') or {}).get('staminaPercent', 100))
+        allowed = {'useStaminaPotion': potions > 0 and stamina < 100,
+                   'useTreasureStone': stones > 0 and self.current_map != 7 and remaining == 0,
+                   'enterTreasureLand': remaining > 0 and self.current_map != 7,
+                   'leaveTreasureLand': self.current_map == 7,
+                   'useFishingRod': self.fishing_rod() is not None}
+        for action, button in self.activity_buttons.items():
+            button.setEnabled(ready and allowed[action])
+        self.activity_buttons['enterTreasureLand'].setText(
+            f'重返秘宝之地 · 剩余 {remaining // 60:02d}:{remaining % 60:02d}')
+        self.activity_status.setToolTip(f'体力恢复药水 {potions} 瓶 · 秘宝之石 {stones} 颗')
+        self.activity_resources.setText(f'体力药水 {potions} 瓶 · 秘宝之石 {stones} 颗' +
+                                       (' · 持有木钓竿' if self.fishing_rod() else ''))
+
+    def request_activity(self, action: str) -> bool:
+        self.update_activity_controls()
+        button = self.activity_buttons.get(action)
+        if button is None or not button.isEnabled():
+            self.activity_status.setText('角色未就绪、操作处理中，或没有所需道具/通行资格。')
+            return False
+        packet = {'action': action}
+        if action == 'useFishingRod':
+            packet['playerItemId'] = self.fishing_rod()['playerItemId']
+        if action != 'useStaminaPotion':
+            self.auto_attack.setChecked(False)
+            self.auto_quest.setChecked(False)
+            self.quest_map_auto.setChecked(False)
+            self.quest_map_target = None
+            self.quest_map_quest_id = None
+            self.questless_farm_mode = False
+            self.questless_farm_target = None
+            self.cancel_travel()
+            self.stop_chase()
+            self.stop_patrol(reset_anchor=True)
+            self.combat_generation += 1
+        try:
+            self.send_stationary_sync(force=True)
+            self.send_game_packet(packet)
+        except Exception as exc:
+            self.activity_status.setText(f'操作未发送：{type(exc).__name__}: {exc}')
+            return False
+        self._activity_pending = (action, time.monotonic())
+        self.activity_status.setText('请求已发送，等待服务器确认。')
+        self.update_activity_controls()
+        return True
+
+    def accept_activity_packet(self, packet: dict) -> bool:
+        kind = packet.get('type')
+        if kind in ('stamina_potion_dropped', 'treasure_stone_dropped'):
+            self.append_log('获得体力恢复药水。' if kind == 'stamina_potion_dropped' else '获得秘宝之石。')
+            return True  # Quantity comes from the authoritative snapshot/economy event.
+        if kind in ('treasure_failed', 'fishing_rod_failed', 'stamina_potion_failed'):
+            self._activity_pending = None
+            self.activity_status.setText('服务器拒绝操作：请确认道具、通行时间及是否处于战斗中。')
+            self.update_activity_controls()
+            return True
+        if kind == 'stamina_potion_used':
+            self._activity_pending = None
+            self.last_self_state['staminaPotions'] = packet.get('quantity', 0)
+            self.last_self_state['farming'] = dict(self.last_self_state.get('farming') or {}, staminaPercent=100)
+            self.activity_status.setText('服务器确认体力药水已使用；体力以下一帧角色状态为准。')
+            self.update_activity_controls()
+            return True
+        if kind == 'treasure_position':
+            self.apply_activity_position(packet)
+            return True
+        if kind == 'town_stone_arrived':
+            self.apply_activity_position(dict(packet, map=1))
+            return True
+        return False
+
+    def apply_activity_position(self, packet: dict) -> None:
+        revision = int(packet.get('revision', self.movement_revision))
+        if revision < self.movement_revision:
+            return
+        self.auto_attack.setChecked(False)
+        self.auto_quest.setChecked(False)
+        self.quest_map_auto.setChecked(False)
+        self.questless_farm_mode = False
+        self.quest_map_target = None
+        self.cancel_travel()
+        self.stop_chase()
+        self.stop_patrol(reset_anchor=True)
+        self.combat_generation += 1
+        self._activity_pending = None
+        self.movement_revision = revision
+        self.set_current_map(packet.get('map', self.current_map))
+        self.world_x, self.world_y = packet.get('x', self.world_x), packet.get('y', self.world_y)
+        self.position_estimated = False
+        self.accept_activity_resources(packet, packet.get('serverTime'))
+        self.activity_status.setText('通行已到期，服务器已送回主城。' if packet.get('expired') else '服务器已确认到达；可手动开启新的战斗方案。')
+        self.update_map_buttons()
+        self.update_activity_controls()
+
     def update_combat_stats(self) -> None:
         labels = getattr(self, "combat_stat_labels", {})
         stats = getattr(self, "combat_stats", {})
@@ -5391,8 +5907,122 @@ class MainWindow(QMainWindow):
         for key, label in labels.items():
             label.setText(f"{titles[key]} {int(stats.get(key, 0))}")
 
+    def request_map_path(self, map_id: int, start: tuple[float, float],
+                         goal: tuple[float, float], kind: str, context: dict) -> None:
+        """Plan a route in a worker so A* never blocks the Qt event loop."""
+        self.cancel_map_path_request()
+        self._path_generation += 1
+        request_id = self._path_generation
+        self._pending_path_request = {"id": request_id, "kind": kind, "context": context}
+        future = submit_map_path(map_id, start, goal)
+        self._path_future = future
+
+        def deliver(done) -> None:
+            try:
+                route, error = done.result(), None
+            except Exception as exc:
+                route, error = None, f"{type(exc).__name__}: {exc}"
+            try:
+                self.bridge.path_result.emit(request_id, route, error)
+            except RuntimeError:
+                pass  # The account window may have closed while a process was routing.
+
+        future.add_done_callback(deliver)
+
+    def cancel_map_path_request(self, *kinds: str) -> None:
+        pending = self._pending_path_request
+        if pending is None or (kinds and pending.get("kind") not in kinds):
+            return
+        self._path_generation += 1
+        self._pending_path_request = None
+        future = self._path_future
+        self._path_future = None
+        if future is not None:
+            future.cancel()
+
+    def on_map_path_ready(self, request_id: int, route: object, error: object) -> None:
+        """Apply a worker result on the GUI thread, dropping stale routes."""
+        pending = self._pending_path_request
+        if not isinstance(pending, dict) or pending.get("id") != request_id:
+            return
+        self._pending_path_request = None
+        self._path_future = None
+        kind, context = pending["kind"], pending["context"]
+
+        if kind == "patrol":
+            if (error or not route or self.current_map != context["map"]
+                    or not self.world_ready or self.ws is None or not self.auto_attack.isChecked()):
+                self.patrol_retry_after = time.monotonic() + 3.0
+                if error:
+                    self.combat_status.setText(f"整图路线规划失败：{error}")
+                elif not route:
+                    self.combat_status.setText("整图路线暂不可达，3 秒后重新规划搜索路线。")
+                return
+            self.patrol_route = list(route)
+            self.patrol_last_at = time.monotonic()
+            self.patrol_timer.start()
+            if self.current_map == 2:
+                row, count = context["row"], context["row_count"]
+                self.combat_status.setText(
+                    f"当前暂未发现目标，正在搜索北部雪地整图（第 {row + 1}/{count} 条巡逻线）。发现后立即追击。")
+            else:
+                self.combat_status.setText("当前暂未发现目标，正在扩大巡逻范围搜索整张地图；发现目标后会立即追击。")
+            self.append_log(f"当前地图暂无可攻击怪物，开始扩大范围搜索（地图 {self.current_map}）。")
+            return
+
+        if kind == "chase":
+            encounter_id = context["encounter"]
+            monster = self.monsters.get(encounter_id)
+            if (self.current_map != context["map"] or not monster
+                    or int(monster.get("health", 0)) <= 0
+                    or not self.monster_matches_active_quest(monster)
+                    or not self.monster_matches_level_range(monster)
+                    or not self.monster_is_uncontested(monster)
+                    or (self.elite_only.isChecked()
+                        and str(monster.get("monsterRank", "")).upper() != "ELITE")):
+                return
+            if error or not route:
+                self.combat_status.setText(f"找到怪物 {encounter_id[:8]}，但路线暂不可达；稍后重试。")
+                self.chase_retry_after = time.monotonic() + 3.0
+                return
+            self.begin_chase(encounter_id, list(route))
+            return
+
+        if kind == "portal":
+            destination, attempt = context["destination"], context["attempt"]
+            if self.pending_destination != destination or self.travel_attempt != attempt:
+                return
+            if error or not route:
+                self.pending_destination = None
+                self.pending_portal = None
+                self.travel_status.setText("无法从当前坐标找到主城可通行路径；已取消切图。")
+                self.update_map_buttons()
+                return
+            self.route_points = list(route)
+            self.last_move_at = time.monotonic()
+            portal = context["portal"]
+            self.travel_status.setText(
+                f"正沿 {len(self.route_points)} 段可通行路线前往入口 ({portal[0]}, {portal[1]})。")
+            self.move_timer.start()
+            return
+
+        if kind == "coordinate":
+            if (self.current_map != context["map"] or not self.manual_move_active):
+                return
+            if error or not route:
+                self.manual_move_active = False
+                self.travel_status.setText("当前位置到目标点没有可验证的路线。")
+                return
+            self.route_points = list(route)
+            self.last_move_at = time.monotonic()
+            self.travel_status.setText(
+                f"正在前往手动选定位置 ({context['goal'][0]:.0f}, {context['goal'][1]:.0f})…")
+            self.move_timer.start()
+
     def start_patrol(self) -> None:
         """Search the current map while waiting for server-reported spawns."""
+        if self._pending_path_request is not None:
+            return
         if self.current_map == 1:
             self.stop_patrol(reset_anchor=True)
             self.combat_status.setText("主城没有怪物，已暂停自动搜索；进入野外地图后会继续找怪。")
@@ -5404,6 +6034,9 @@ class MainWindow(QMainWindow):
         if self.patrol_anchor is None:
             self.patrol_anchor = (float(self.world_x), float(self.world_y))
         start = (float(self.world_x), float(self.world_y))
+        if self.current_map in (2, 7):
+            self.start_snowfield_sweep(start)
+            return
         directions = ((0, -1), (1, -1), (1, 0), (1, 1),
                       (0, 1), (-1, 1), (-1, 0), (-1, -1))
         for _ in range(len(directions)):
@@ -5418,13 +6051,14 @@ class MainWindow(QMainWindow):
             self.patrol_direction_index += 1
             if self.patrol_direction_index == len(directions):
                 self.patrol_direction_index = 0
-                if self.patrol_ring >= 3200:
-                    self.patrol_ring = 320.0
-                    self.patrol_anchor = start
-                else:
-                    self.patrol_ring += 320.0
-            if self.current_map in (1, 2):
-                path = find_map_path(self.current_map, start, goal, max_distance=self.patrol_ring + 400)
+                # Keep widening indefinitely; restarting at the player's
+                # current position made a large map look like a local search.
+                self.patrol_ring += 320.0
+            if self.current_map == 1:
+                self.request_map_path(self.current_map, start, goal, "patrol",
+                                      {"map": self.current_map, "row": 0, "row_count": 1})
+                self.combat_status.setText("正在后台规划巡逻路线，界面可以继续操作…")
+                return
             else:
                 # Detailed collision grids are only available for maps 1/2.
                 # On other maps, probe a short local waypoint and let the
@@ -5439,13 +6073,39 @@ class MainWindow(QMainWindow):
                 self.patrol_route = list(path)
                 self.patrol_last_at = time.monotonic()
                 self.patrol_timer.start()
-                note = ("已验证路线，逐圈扩大至 3200 单位" if self.current_map in (1, 2)
-                        else "逐圈扩大搜索路线")
-                self.combat_status.setText(f"当前暂未发现怪物，正在沿{note}搜索；发现目标后会立即追击。")
-                self.append_log(f"当前地图暂无可攻击怪物，开始搜索（地图 {self.current_map}，{note}）。")
+                self.combat_status.setText("当前暂未发现目标，正在扩大巡逻范围搜索整张地图；发现目标后会立即追击。")
+                self.append_log(f"当前地图暂无可攻击怪物，开始扩大范围搜索（地图 {self.current_map}）。")
                 return
         self.patrol_retry_after = time.monotonic() + 3.0
         self.combat_status.setText("附近巡逻路线暂不可达，3 秒后重新规划搜索路线。")
+
+    def start_snowfield_sweep(self, start: tuple[float, float]) -> None:
+        """Sweep the complete 120x120-cell snowfield in alternating rows."""
+        cell = 64.0
+        margin = 48.0
+        low, high = margin, 120 * cell - margin
+        lane_spacing = 320.0
+        row_count = int(math.ceil((high - low) / lane_spacing)) + 1
+        row_index = self.patrol_sweep_row % row_count
+        target_y = min(high, low + row_index * lane_spacing)
+        target_x = high if self.patrol_sweep_direction > 0 else low
+
+        # When one side of the map is reached, move to the opposite edge,
+        # advance a lane, and reverse direction. Keep the in-between connector
+        # inside the known playable rectangle.
+        horizontal_ready = abs(float(self.world_x) - target_x) <= 48.0
+        vertical_ready = abs(float(self.world_y) - target_y) <= 48.0
+        if horizontal_ready and vertical_ready:
+            self.patrol_sweep_direction *= -1
+            self.patrol_sweep_row = (row_index + 1) % row_count
+            row_index = self.patrol_sweep_row
+            target_y = min(high, low + row_index * lane_spacing)
+            target_x = high if self.patrol_sweep_direction > 0 else low
+
+        goal = (target_x, target_y)
+        self.request_map_path(self.current_map, start, goal, "patrol",
+                              {"map": self.current_map, "row": row_index, "row_count": row_count})
+        self.combat_status.setText(f"正在后台规划{MAP_NAMES[self.current_map]}整图路线…")
 
     def advance_patrol(self) -> None:
         if (self.ws is None or not self.world_ready or self.current_map not in MAP_NAMES
@@ -5491,6 +6151,7 @@ class MainWindow(QMainWindow):
         self.position_estimated = True
 
     def stop_patrol(self, *, reset_anchor: bool = False) -> None:
+        self.cancel_map_path_request("patrol")
         if hasattr(self, "patrol_timer"):
             self.patrol_timer.stop()
         self.patrol_route = []
@@ -5510,17 +6171,25 @@ class MainWindow(QMainWindow):
             return
         start = float(self.world_x), float(self.world_y)
         goal = float(monster["x"]), float(monster["y"])
-        # Detailed collision maps are currently available for maps 1 and 2.
-        # Other maps still chase every server-reported monster by approaching
-        # it directly; the server remains authoritative and may correct an
-        # invalid position if an obstacle blocks the straight route.
-        path = find_map_path(self.current_map, start, goal) if self.current_map in (1, 2) else [goal]
+        if self.current_map in (1, 2, 7):
+            self.request_map_path(self.current_map, start, goal, "chase",
+                                  {"map": self.current_map, "encounter": encounter_id})
+            self.combat_status.setText(f"正在后台规划到怪物 {encounter_id[:8]} 的路线…")
+            return
+        # Other maps still approach server-reported monsters directly; the
+        # authoritative server can correct movement around unknown obstacles.
+        self.begin_chase(encounter_id, [goal])
+
+    def begin_chase(self, encounter_id: str, path: list[tuple[float, float]]) -> None:
+        if self.world_x is None or self.world_y is None:
+            return
+        start = float(self.world_x), float(self.world_y)
         if not path:
             self.combat_status.setText(f"找到怪物 {encounter_id[:8]}，但当前地图缺少可验证的追击路线。")
             self.chase_retry_after = time.monotonic() + 3.0
             return
         points = [start, *path]
-        remaining = 35.0
+        remaining = 280.0 if self.current_character_class() == 'ARCHER' else 35.0
         approach = []
         for index in range(len(points) - 1, 0, -1):
             segment = math.dist(points[index - 1], points[index])
@@ -5548,7 +6217,7 @@ class MainWindow(QMainWindow):
         if not monster or int(monster.get("health", 0)) <= 0 or self.pending_destination is not None:
             self.stop_chase()
             return
-        if self.monster_distance(monster) <= 45:
+        if self.monster_distance(monster) <= (285.0 if self.current_character_class() == 'ARCHER' else 45.0):
             self.stop_chase()
             return
         while self.chase_route and math.dist((float(self.world_x), float(self.world_y)), self.chase_route[0]) <= 1:
@@ -5580,6 +6249,7 @@ class MainWindow(QMainWindow):
         self.position_estimated = True
 
     def stop_chase(self) -> None:
+        self.cancel_map_path_request("chase")
         self.chase_timer.stop()
         self.chase_target = None
         self.chase_route = []
@@ -5589,7 +6259,11 @@ class MainWindow(QMainWindow):
             raise WsError("连接已断开")
         self.sequence += 1
         payload = dict(packet, seq=self.sequence, life=self.life)
-        self.ws.send_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        try:
+            self.enqueue_socket_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            self.sequence -= 1
+            raise
         if packet.get("action") == "sync":
             self.last_position_sync_at = time.monotonic()
         if packet.get("action") == "sync" and packet.get("animation") == "run":
@@ -5657,6 +6331,7 @@ class MainWindow(QMainWindow):
                 and time.monotonic() - self.last_pong_received_at > 12):
             self.append_log("12 秒未收到服务端 pong，判定连接失活并触发自动重连。")
             ws, self.ws = self.ws, None
+            self.stop_socket_writer(ws)
             self.keepalive.stop()
             ws.close()
             self.bridge.state.emit("心跳超时，正在重连…")
@@ -5674,6 +6349,12 @@ class MainWindow(QMainWindow):
             self.keepalive.stop()
 
     def travel_to(self, destination: int, *, recovery: bool = False) -> None:
+        if destination == 7:
+            self.request_activity('enterTreasureLand')
+            return
+        if self.current_map == 7 and destination == 1:
+            self.request_activity('leaveTreasureLand')
+            return
         if not self.world_ready or self.current_map is None or self.pending_destination is not None:
             return
         if not recovery:
@@ -5682,23 +6363,25 @@ class MainWindow(QMainWindow):
                 self.auto_route_retry_count = 0
         if self.chase_target is not None:
             self.stop_chase()
+        self.stop_patrol()
         self.manual_move_active = False
         if self.world_x is None or self.world_y is None:
             self.travel_status.setText("没有服务端位置，无法构造同步帧。")
             return
         portal = PORTAL_CENTERS.get((self.current_map, destination))
-        if portal and self.current_map == 1:
-            route = find_town_path((float(self.world_x), float(self.world_y)), portal)
-            if not route:
-                self.travel_status.setText("无法从当前坐标找到主城可通行路径；已取消切图。")
-                return
-            self.route_points = list(route)
-        else:
-            self.route_points = [portal] if portal else []
         self.pending_destination = destination
         self.pending_portal = portal
         self.travel_attempt += 1
         attempt = self.travel_attempt
+        if portal and self.current_map == 1:
+            self.route_points = []
+            self.travel_status.setText("正在后台规划前往主城入口的路线…")
+            self.request_map_path(1, (float(self.world_x), float(self.world_y)), portal,
+                                  "portal", {"destination": destination,
+                                             "attempt": attempt, "portal": portal})
+            self.update_map_buttons()
+            return
+        self.route_points = [portal] if portal else []
         if portal:
             self.last_move_at = time.monotonic()
             self.travel_status.setText(f"正沿 {len(self.route_points)} 段可通行路线前往入口 ({portal[0]}, {portal[1]})。")
@@ -5771,6 +6454,7 @@ class MainWindow(QMainWindow):
             self.last_world_status_render_at = now
 
     def cancel_travel(self) -> None:
+        self.cancel_map_path_request("portal", "coordinate")
         self.return_map_target = None
         self.manual_map_target = None
         self.manual_coordinate_target = None
@@ -5825,6 +6509,9 @@ class MainWindow(QMainWindow):
         self.travel_status.setText("找不到通往批量地图目标的已知路线。")
 
     def start_manual_map_travel(self, destination: int, coordinate_target=None) -> None:
+        if destination == 7:
+            self.travel_to(7)
+            return
         self.return_map_target = None
         self.quest_map_target = None
         self.manual_map_target = int(destination)
@@ -5845,24 +6532,23 @@ class MainWindow(QMainWindow):
             self.travel_status.setText("目标坐标无效。")
             return False
         start = float(self.world_x), float(self.world_y)
-        if self.current_map in (1, 2):
-            route = find_map_path(self.current_map, start, goal)
-        else:
-            route = [goal]
-        if not route:
-            self.travel_status.setText("当前位置到目标点没有可验证的路线。")
-            return False
         self.move_timer.stop()
         self.stop_chase()
         self.stop_patrol()
-        self.route_points = list(route)
+        self.route_points = []
         self.pending_destination = None
         self.pending_portal = None
         self.return_map_target = None
         self.manual_move_active = True
-        self.last_move_at = time.monotonic()
-        self.travel_status.setText(f"正在前往手动选定位置 ({goal[0]:.0f}, {goal[1]:.0f})…")
-        self.move_timer.start()
+        if self.current_map in (1, 2, 7):
+            self.travel_status.setText("正在后台规划手动移动路线…")
+            self.request_map_path(self.current_map, start, goal, "coordinate",
+                                  {"map": self.current_map, "goal": goal})
+        else:
+            self.route_points = [goal]
+            self.last_move_at = time.monotonic()
+            self.travel_status.setText(f"正在前往手动选定位置 ({goal[0]:.0f}, {goal[1]:.0f})…")
+            self.move_timer.start()
         return True
 
     def continue_return_map(self) -> None:
@@ -5954,4 +6640,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
