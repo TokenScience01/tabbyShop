@@ -23,6 +23,7 @@ from email.utils import parsedate_to_datetime
 
 from navigation_service import submit_map_path
 from town_navigation import MAP_FILES
+from market_listing import MarketListingDialog, listing_key, listing_payload
 from minimap import TacticalMap, peer_map_position
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings, QSize
@@ -1709,12 +1710,12 @@ class MainWindow(QMainWindow):
         self.equip_item_button.clicked.connect(self.equip_selected_item)
         self.sell_item_button = QPushButton("上架出售")
         self.sell_item_button.setObjectName("secondaryButton")
-        self.sell_item_button.setToolTip("当前游戏客户端没有可核实的装备上架接口；点击查看状态，不会发送猜测的交易请求。")
-        self.sell_item_button.clicked.connect(self.explain_item_listing_status)
+        self.sell_item_button.setToolTip("选择物品，读取服务器最低价、手续费和到账报价后手动确认上架。")
+        self.sell_item_button.clicked.connect(self.open_item_listing)
         inventory_actions.addWidget(self.equip_item_button)
         inventory_actions.addWidget(self.sell_item_button)
         inventory_box.addLayout(inventory_actions)
-        self.inventory_action_status = QLabel("装备可直接操作；上架按钮会说明当前服务端协议状态。")
+        self.inventory_action_status = QLabel("选择物品后可穿戴、卸下，或读取报价后手动上架。")
         self.inventory_action_status.setObjectName("subtitle")
         self.inventory_action_status.setWordWrap(True)
         inventory_box.addWidget(self.inventory_action_status)
@@ -2853,6 +2854,9 @@ class MainWindow(QMainWindow):
         self._fishpond_pending = False
         self._fishpond_submitted = set()
         self._api_request_ids = {}
+        self._listing_submit_pending = False
+        self._listing_blocked = set()
+        self._listing_dialog = None
         self._delivery_submit_pending = False
         self.monsters = {}
         self.monsters_by_map = {}
@@ -3485,6 +3489,9 @@ class MainWindow(QMainWindow):
             if self._delivery_submit_pending:
                 return
             item_ids = [item_id for check, item_id in checks if check.isChecked()]
+            if self._listing_submit_pending or any(('item', str(item_id)) in self._listing_blocked for item_id in item_ids):
+                counter.setText('所选装备有上架请求，请先核对商城状态。')
+                return
             if len(item_ids) != target:
                 return
             confirm.setEnabled(False)
@@ -3791,7 +3798,7 @@ class MainWindow(QMainWindow):
         return quality_order.get(quality, 0), level
 
     def auto_equip_best_inventory_item(self) -> None:
-        if self.fishing_busy():
+        if self.fishing_busy() or self._listing_submit_pending:
             return
         if (not hasattr(self, "auto_equip_better") or not self.auto_equip_better.isChecked()
                 or self._auto_equip_pending_id is not None):
@@ -4465,6 +4472,11 @@ class MainWindow(QMainWindow):
             key = str(data["socialApiKey"])
             if data.get('socialApiRequestId', self._api_request_ids.get(key)) != self._api_request_ids.get(key):
                 return
+            if key.startswith('marketListing'):
+                dialog = self._listing_dialog
+                if dialog is not None:
+                    dialog.accept_response(key, data)
+                return
             if key == 'fishingInventory':
                 equipment = data.get('socialApiResult')
                 if not data.get('socialApiError') and isinstance(equipment, dict) and isinstance(equipment.get('items'), list):
@@ -4867,8 +4879,8 @@ class MainWindow(QMainWindow):
             self.backpack_compare_button.clicked.connect(self.compare_backpack_selection)
             self.backpack_sell_button = QPushButton("上架出售")
             self.backpack_sell_button.setObjectName("secondaryButton")
-            self.backpack_sell_button.setToolTip("当前游戏客户端没有可核实的装备上架接口；点击查看状态。")
-            self.backpack_sell_button.clicked.connect(self.explain_item_listing_status)
+            self.backpack_sell_button.setToolTip("选择物品并核对服务器报价后手动上架。")
+            self.backpack_sell_button.clicked.connect(self.open_item_listing)
             actions.addWidget(self.backpack_equip_button)
             actions.addWidget(self.backpack_compare_button)
             actions.addWidget(self.backpack_sell_button)
@@ -4889,6 +4901,10 @@ class MainWindow(QMainWindow):
 
     def request_social_api(self, key: str, path: str, method: str = "GET", body: dict | None = None) -> None:
         if key == 'equip' and body:
+            if ('item', str(body.get('playerItemId'))) in self._listing_blocked:
+                self._auto_equip_pending_id = None
+                self.inventory_action_status.setText('该物品已有上架请求，暂不能穿戴。')
+                return
             item = next((item for item in self.api_equipment.get('items', [])
                          if str(item.get('playerItemId')) == str(body.get('playerItemId'))), None)
             if item is not None and not self.equipment_matches_class(item):
@@ -4921,7 +4937,15 @@ class MainWindow(QMainWindow):
                 request = urllib.request.Request(root + path, data=encoded, headers=headers, method=method)
                 with urllib.request.urlopen(request, timeout=10) as response:
                     raw = response.read().decode("utf-8")
+                    result["socialApiStatus"] = response.status
                     result["socialApiResult"] = json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as exc:
+                result['socialApiStatus'] = exc.code
+                try:
+                    result['socialApiResult'] = json.loads(exc.read().decode('utf-8', 'replace'))
+                except (ValueError, UnicodeError):
+                    result['socialApiResult'] = {}
+                result['socialApiError'] = f'HTTP {exc.code}'
             except Exception as exc:
                 result["socialApiError"] = f"{type(exc).__name__}: {exc}"
             self.bridge.profile.emit(result)
@@ -5164,7 +5188,16 @@ class MainWindow(QMainWindow):
                           ("treasureStones", "秘宝之石")):
             count = self.last_self_state.get(key)
             if isinstance(count, (int, float)) and count > 0:
-                rows.append([name, "消耗品", "—", str(int(count)), "", None])
+                code = {'healthPotions': 'HEALTH_POTION', 'bossTickets': 'BOSS_ENTRY_TICKET',
+                        'atonementStones': 'ATONEMENT_STONE', 'staminaPotions': 'STAMINA_POTION',
+                        'treasureStones': 'TREASURE_STONE'}[key]
+                rows.append([name, "消耗品", "—", str(int(count)), "",
+                             {'itemCode': code, 'slotType': 'OTHER', 'quantity': int(count)}])
+        stones = self.last_self_state.get('townStones', [])
+        for stone in stones if isinstance(stones, list) else []:
+            if isinstance(stone, dict) and stone.get('stoneId') is not None:
+                rows.append(['回城石', '消耗品', '—', '1', '',
+                             dict(stone, itemCode='TOWN_STONE', slotType='OTHER', quantity=1)])
         self.backpack_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
             quality = values[4]
@@ -5225,16 +5258,76 @@ class MainWindow(QMainWindow):
         return next((item for item in items if isinstance(item, dict) and item.get("equipped")
                      and str(item.get("slotType", "")).upper() == slot), None)
 
-    def explain_item_listing_status(self) -> None:
-        message = (
-            "当前客户端已确认的装备接口只有读取、穿戴、卸下和丢弃；未发现可核实的装备上架接口。\n\n"
-            "为避免误请求或误操作，这里不会伪造上架成功。上架功能需要服务端提供正式的商品创建/挂牌接口和参数后才能接通。"
-        )
-        if hasattr(self, "backpack_status") and self.sender() is getattr(self, "backpack_sell_button", None):
-            self.backpack_status.setText("暂不可上架：游戏服务端接口尚未核实。")
-        elif hasattr(self, "inventory_action_status"):
-            self.inventory_action_status.setText("暂不可上架：游戏服务端接口尚未核实。")
-        QMessageBox.information(self, "上架出售", message)
+    def current_listing_item(self, key):
+        for item in self.api_equipment.get('items', []):
+            if isinstance(item, dict) and listing_key(item) == key:
+                return dict(item)
+        resources = {'HEALTH_POTION': 'healthPotions', 'BOSS_ENTRY_TICKET': 'bossTickets',
+                     'ATONEMENT_STONE': 'atonementStones', 'TREASURE_STONE': 'treasureStones'}
+        if key[0] == 'resource' and key[1] in resources:
+            return {'itemCode': key[1], 'slotType': 'OTHER',
+                    'quantity': self.last_self_state.get(resources[key[1]], 0)}
+        stones = self.last_self_state.get('townStones', [])
+        for stone in stones if isinstance(stones, list) else []:
+            if str(stone.get('stoneId')) == key[1] and key[0] == 'stone':
+                return dict(stone, itemCode='TOWN_STONE', slotType='OTHER', quantity=1)
+        return None
+
+    def open_item_listing(self) -> None:
+        if self._listing_dialog is not None and self._listing_dialog.isVisible():
+            self._listing_dialog.raise_()
+            return
+        if not self.get_session_token():
+            self.inventory_action_status.setText('请先登录账号后再上架。')
+            return
+        if self.fishing_busy() or self._listing_submit_pending or self._delivery_submit_pending or self._fishpond_pending:
+            self.inventory_action_status.setText('钓鱼、兑换、交付或上架正在处理，请等待结果。')
+            return
+        from_backpack = self.sender() is not None and self.sender() is getattr(self, 'backpack_sell_button', None)
+        table = self.backpack_table if from_backpack else self.social_inventory_table
+        rows = {index.row() for index in table.selectionModel().selectedRows()}
+        row = table.currentRow()
+        cell = table.item(row, 0) if row >= 0 else None
+        item = cell.data(Qt.ItemDataRole.UserRole) if cell else None
+        if len(rows) != 1 or not isinstance(item, dict):
+            self.inventory_action_status.setText('请只选择一件要上架的物品。')
+            if hasattr(self, 'backpack_status'):
+                self.backpack_status.setText('请只选择一件要上架的物品。')
+            return
+        key = listing_key(item)
+        if key in self._listing_blocked:
+            self.inventory_action_status.setText('该物品已有上架请求，请核对官网商城，勿重复提交。')
+            return
+        fresh = self.current_listing_item(key)
+        if fresh is None:
+            self.inventory_action_status.setText('物品已不在当前库存中，请刷新背包。')
+            return
+        try:
+            listing_payload(fresh, 10 if fresh.get('itemCode') == 'HEALTH_POTION' else 1, '100', '0')
+        except (ValueError, TypeError) as exc:
+            self.inventory_action_status.setText(str(exc))
+            if hasattr(self, 'backpack_status'):
+                self.backpack_status.setText(str(exc))
+            return
+        self._listing_dialog = MarketListingDialog(self, fresh, localized_item_name(fresh))
+        self._listing_dialog.show()
+        self._listing_dialog.load_settings()
+
+    def listing_confirmed(self, item, quantity):
+        key = listing_key(item)
+        if key[0] == 'resource':
+            field = {'HEALTH_POTION': 'healthPotions', 'BOSS_ENTRY_TICKET': 'bossTickets',
+                     'ATONEMENT_STONE': 'atonementStones', 'TREASURE_STONE': 'treasureStones'}[key[1]]
+            self.last_self_state[field] = max(0, int(self.last_self_state.get(field, 0)) - quantity)
+            self._listing_blocked.discard(key)
+        elif key[0] == 'stone':
+            self.last_self_state['townStones'] = [stone for stone in self.last_self_state.get('townStones', [])
+                                                if str(stone.get('stoneId')) != key[1]]
+        self.api_equipment['items'] = [owned for owned in self.api_equipment.get('items', []) if listing_key(owned) != key]
+        self.inventory_action_status.setText('服务器确认上架成功，正在刷新背包。')
+        self.update_social_inventory()
+        self.update_backpack()
+        self.refresh_profile_data(force=True)
 
     def compare_backpack_selection(self) -> None:
         selected_rows = sorted({index.row() for index in self.backpack_table.selectionModel().selectedRows()})
@@ -5847,7 +5940,7 @@ class MainWindow(QMainWindow):
     def fishing_rod(self) -> dict | None:
         return next((item for item in self.api_equipment.get('items', [])
                      if isinstance(item, dict) and item.get('itemCode') == 'WOODEN_FISHING_ROD'
-                     and item.get('playerItemId') is not None), None)
+                     and item.get('playerItemId') is not None and listing_key(item) not in self._listing_blocked), None)
 
     def fishing_busy(self) -> bool:
         pending = getattr(self, '_activity_pending', None)
@@ -5855,13 +5948,13 @@ class MainWindow(QMainWindow):
                     (pending and pending[0] == 'useFishingRod'))
 
     def redeem_fishpond(self) -> None:
-        if self._fishpond_pending or self.fishing_busy() or not self.world_ready:
+        if self._fishpond_pending or self._listing_submit_pending or self.fishing_busy() or not self.world_ready:
             self.activity_status.setText('角色未就绪或有操作正在处理。')
             return
         items = [item for item in self.api_equipment.get('items', [])
                  if item.get('itemCode') == 'FISHPOND_NFT' and item.get('playerItemId') is not None
                  and not item.get('equipped') and not item.get('locked') and not item.get('listed')
-                 and str(item['playerItemId']) not in self._fishpond_submitted]
+                 and str(item['playerItemId']) not in self._fishpond_submitted and listing_key(item) not in self._listing_blocked]
         if not items:
             self.activity_status.setText('没有可兑换的 FishPond NFT；请先刷新背包，已提交道具不重复兑换。')
             return
@@ -5972,7 +6065,7 @@ class MainWindow(QMainWindow):
             self.activity_status.setText('钓鱼结果未返回，请核对库存；不会自动重发消耗请求。')
         ready = bool(self.ws is not None and self.world_ready and not self.server_dead
                      and not self.respawn_pending and self.pending_destination is None and not self._activity_pending
-                     and not self.fishing_busy() and not self._activity_uncertain)
+                     and not self.fishing_busy() and not self._activity_uncertain and not self._listing_submit_pending)
         remaining = max(0, math.ceil(self._treasure_access_until - time.monotonic()))
         stones = int(self.last_self_state.get('treasureStones', 0) or 0)
         potions = int(self.last_self_state.get('staminaPotions', 0) or 0)

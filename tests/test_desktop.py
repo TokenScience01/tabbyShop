@@ -1542,10 +1542,11 @@ class DesktopTests(unittest.TestCase):
         game.equip_selected_item()
         self.assertEqual(calls[-1], ('unequip', '/equipment/unequip', 'POST', {'slotType': 'ARMOR'}))
         self.assertTrue(game.sell_item_button.isEnabled())
-        with patch.object(QMessageBox, 'information') as info:
+        with patch.object(game, 'get_session_token', return_value='test-listing-session'):
             game.sell_item_button.click()
-        info.assert_called_once()
-        self.assertIn('暂不可上架', game.inventory_action_status.text())
+        self.assertEqual(calls[-1], ('marketListingSettings', '/shop/listing-settings'))
+        self.assertTrue(game._listing_dialog.isVisible())
+        game._listing_dialog.close()
 
     def test_backpack_shows_attributes_and_allows_same_slot_comparison_selection(self):
         game = self.window.game
@@ -2054,6 +2055,97 @@ class DesktopTests(unittest.TestCase):
             quest.assert_not_called()
         self.assertFalse(game.auto_quest.isChecked())
         self.assertIn('钓鱼', self.window.planner_status.text())
+
+    def prepare_listing(self):
+        game = self.window.game
+        game.token.setText('test-listing-session')
+        game.signed_session_token = 'test-listing-session'
+        item = {'playerItemId': 61, 'itemCode': 'SWORDP1', 'slotType': 'WEAPON', 'equipped': True}
+        game.api_equipment = {'items': [item]}
+        game.update_social_inventory()
+        game.social_inventory_table.selectRow(0)
+        return game
+
+    def quote_listing(self, game):
+        game.open_item_listing()
+        dialog = game._listing_dialog
+        game.accept_profile_data({'socialApiKey': 'marketListingSettings', 'socialApiResult': {'minimumPrice': '100'}})
+        dialog.price.setText('100')
+        dialog.delay.stop()
+        dialog.fetch_quote()
+        game.accept_profile_data({'socialApiKey': 'marketListingQuote', 'socialApiResult':
+                                  {'price': '100', 'feePercent': '10', 'feeAmount': '10', 'sellerAmount': '90'}})
+        return dialog
+
+    def test_listing_quote_and_confirm_submit_owned_equipment_once(self):
+        game = self.prepare_listing()
+        with patch.object(game, 'request_social_api') as api, patch.object(game, 'refresh_profile_data'):
+            dialog = self.quote_listing(game)
+            self.assertTrue(dialog.confirm.isEnabled())
+            self.assertIn('90', dialog.totals.text())
+            dialog.submit()
+            api.assert_called_with('marketListingSubmit', '/shop/list', 'POST',
+                                   {'playerItemId': 61, 'price': '100', 'feePercent': '10'})
+            count = api.call_count
+            dialog.submit()
+            dialog.close()
+            self.assertTrue(dialog.isVisible())
+            self.assertEqual(api.call_count, count)
+            game.accept_profile_data({'socialApiKey': 'marketListingSubmit', 'socialApiStatus': 200,
+                                      'socialApiResult': {'ok': True}})
+            self.assertTrue(dialog.completed)
+            self.assertEqual(game.api_equipment['items'], [])
+            self.assertFalse(game._listing_submit_pending)
+            dialog.close()
+
+    def test_listing_price_change_invalidates_quote_and_ignores_old_response(self):
+        game = self.prepare_listing()
+        with patch.object(game, 'request_social_api') as api:
+            dialog = self.quote_listing(game)
+            dialog.price.setText('200')
+            dialog.delay.stop()
+            game.accept_profile_data({'socialApiKey': 'marketListingQuote', 'socialApiResult':
+                                      {'price': '100', 'feePercent': '10', 'feeAmount': '10', 'sellerAmount': '90'}})
+            self.assertFalse(dialog.confirm.isEnabled())
+            api.reset_mock()
+            dialog.submit()
+            api.assert_not_called()
+            dialog.close()
+
+    def test_listing_timeout_stays_blocked_across_reopen(self):
+        game = self.prepare_listing()
+        with patch.object(game, 'request_social_api') as api, patch.object(game, 'refresh_profile_data'):
+            dialog = self.quote_listing(game)
+            dialog.submit()
+            game.accept_profile_data({'socialApiKey': 'marketListingSubmit', 'socialApiError': 'timeout'})
+            self.assertTrue(dialog.uncertain)
+            self.assertIn(('item', '61'), game._listing_blocked)
+            count = api.call_count
+            dialog.submit()
+            dialog.close()
+            game.open_item_listing()
+            self.assertEqual(api.call_count, count)
+
+    def test_listing_checks_current_inventory_again_before_submit(self):
+        game = self.prepare_listing()
+        with patch.object(game, 'request_social_api') as api:
+            dialog = self.quote_listing(game)
+            game.api_equipment = {'items': []}
+            api.reset_mock()
+            dialog.submit()
+            api.assert_not_called()
+            self.assertIn('当前库存', dialog.message.text())
+            dialog.close()
+
+    def test_listing_does_not_submit_after_account_session_changes(self):
+        game = self.prepare_listing()
+        with patch.object(game, 'request_social_api') as api:
+            dialog = self.quote_listing(game)
+            game._login_generation += 1
+            api.reset_mock()
+            dialog.submit()
+            api.assert_not_called()
+            dialog.close()
 
 
 if __name__ == '__main__':
