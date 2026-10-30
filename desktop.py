@@ -69,7 +69,9 @@ class BatchMapCanvas(QWidget):
         self.monster_icon = QPixmap(str(BASE_DIR / 'game_client' / 'assets' / 'monster.webp'))
         self.setMinimumSize(560, 430)
         self.setMouseTracking(True)
-        for key, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json')):
+        for key, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json'),
+                              (7, 'treasure_navigation.json'), (8, 'cave_navigation.json'),
+                              (9, 'oasis_navigation.json'), (10, 'frozen_navigation.json')):
             try:
                 payload = json.loads((BASE_DIR / 'game_client' / filename).read_text())
                 cells = payload.get('cells', [])
@@ -1451,11 +1453,14 @@ class DesktopWindow(QMainWindow):
             self.planner_status.setText('请先选择至少一个账号。')
             return
         mode = self.planner_mode.currentData()
-        started, offline = 0, 0
+        started, offline, busy = 0, 0, 0
         for address in selected:
             game = self._game_sessions.get(address.lower())
             if game is None or game.status.text() != '已连接':
                 offline += 1
+                continue
+            if game.fishing_busy():
+                busy += 1
                 continue
             game.auto_potion.setChecked(self.planner_use_potion.isChecked())
             limited = self.planner_limit_level.isChecked()
@@ -1481,7 +1486,8 @@ class DesktopWindow(QMainWindow):
                 game.accept_next_monster_quest()
             started += 1
         self.planner_status.setText(
-            f'已启动 {started} 个账号' + (f'；跳过离线账号 {offline} 个' if offline else '') + '。')
+            f'已启动 {started} 个账号' + (f'；跳过离线账号 {offline} 个' if offline else '') +
+            (f'；跳过钓鱼或库存核对中的账号 {busy} 个' if busy else '') + '。')
 
     def pause_multi_account_plan(self):
         games = self.selected_planner_games()

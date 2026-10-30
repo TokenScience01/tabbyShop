@@ -25,7 +25,11 @@ def main():
     timer.timeout.connect(heartbeat)
     timer.start()
     started = time.perf_counter()
-    jobs = [submit_map_path(1, (1039.25 + i, 1238.24), (-544, 928)) for i in range(9)]
+    if '--new-maps' in sys.argv:
+        jobs = [submit_map_path(map_id, (3232, 5984), {'sweep': 20 + i})
+                for i in range(3) for map_id in (8, 9, 10)]
+    else:
+        jobs = [submit_map_path(1, (1039.25 + i, 1238.24), (-544, 928)) for i in range(9)]
     poll = QTimer()
     poll.setInterval(20)
     poll.timeout.connect(lambda: app.quit() if all(job.done() for job in jobs) else None)

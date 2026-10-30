@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from navigation_service import submit_map_path
+from town_navigation import MAP_FILES
 from minimap import TacticalMap, peer_map_position
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QSettings, QSize
@@ -288,12 +289,13 @@ class Bridge(QObject):
     writer_failed = Signal(object, str)
 
 
-MAP_NAMES = {1: "Tabby Island · 主城", 2: "Northern Snowfield · 北部雪地",
+MAP_NAMES = {1: "Vylo Town · 维洛镇", 2: "Northern Snowfield · 北部雪地",
              3: "Stone Valley · 石谷", 4: "Western Wilds · 西部荒野",
              5: "Abandoned Ruins · 废弃遗迹", 6: "Southern Forest · 南部森林",
-             7: "Treasure Land · 秘宝之地"}
-MAP_ROUTES = {1: (2, 4, 5, 6), 2: (1,), 3: (6,),
-              4: (1,), 5: (1,), 6: (1, 3), 7: (1,)}
+             7: "Treasure Land · 秘宝之地", 8: "Blackstone Cavern · 黑石洞窟",
+             9: "Lost Oasis · 失落绿洲", 10: "Frozen Cavern · 冰封洞穴"}
+MAP_ROUTES = {1: (2, 4, 5, 6), 2: (1, 10), 3: (6,),
+              4: (1, 9), 5: (1,), 6: (1, 3, 8), 7: (1,), 8: (6,), 9: (4,), 10: (2,)}
 CHARACTER_NAMES_ZH = {"WARRIOR": "战士", "GUARD": "守卫", "LANCER": "枪兵", "ARCHER": "弓手"}
 ACTIVITY_ITEM_ACTIONS = {'WOODEN_FISHING_ROD': 'useFishingRod',
                          'STAMINA_POTION': 'useStaminaPotion', 'TREASURE_STONE': 'useTreasureStone'}
@@ -302,7 +304,7 @@ MONSTER_NAMES_ZH = {
     "skeleton": "骷髅怪", "elite_skeleton": "精英骷髅怪",
     "neiro_pump": "南瓜首领",
     "treasure_thief": "盗宝人", "conso": "Conso", "bnb_world": "BNB World",
-    "spacedog": "太空狗",
+    "spacedog": "太空狗", "butterfly": "逆蝶", "marschain": "Marschain", "troll": "巨魔",
 }
 SLOT_NAMES_ZH = {"WEAPON": "武器", "HAT": "头盔", "ARMOR": "护甲", "SHOES": "鞋子",
                  "RING": "戒指", "AMULET": "护符", "OTHER": "消耗品"}
@@ -493,6 +495,9 @@ PORTAL_CENTERS = {
     (4, 1): (9136, 1568), (5, 1): (48, 2528),
     (6, 1): (3872, 96), (6, 3): (7264, 4320),
     (7, 1): (3872, 7616),
+    (6, 8): (1376, 1888), (8, 6): (3232, 6240),
+    (4, 9): (5088, -32), (9, 4): (3232, 6240),
+    (2, 10): (96, 4704), (10, 2): (3232, 6240),
 }
 
 KEYRING_SERVICE = "Tabby Desktop"
@@ -1415,7 +1420,7 @@ class MainWindow(QMainWindow):
         for widget in (self.auto_attack, self.auto_potion, self.elite_only, self.attack_button):
             place(box, widget)
         left.addWidget(battle)
-        activities, box = card("秘宝与钓竿")
+        activities, box = card("秘宝、钓鱼与 Boss 通行")
         self.activity_resources = QLabel('体力药水 — · 秘宝之石 —')
         self.activity_resources.setWordWrap(True)
         box.addWidget(self.activity_resources)
@@ -1428,7 +1433,8 @@ class MainWindow(QMainWindow):
             ('useTreasureStone', '使用 1 颗秘宝之石', '消耗一颗石头，开启一小时通行并进入秘宝之地；离线也计时'),
             ('enterTreasureLand', '通行期内重返秘宝之地', '已有通行时重入，不消耗新的石头'),
             ('leaveTreasureLand', '离开秘宝之地回城', '回到主城；通行时间继续计算'),
-            ('useFishingRod', '使用木钓竿前往钓鱼点', '需要背包中有木钓竿；战斗中不可使用，不消耗钓竿'),
+            ('useFishingRod', '消耗 1 根木钓竿 · 钓鱼', '消耗一根鱼竿，钓鱼约 3 秒；战斗中不可使用，结果由服务器确认'),
+            ('enterBossMap', '通行期内重返 Boss 地图', '已有 Boss 通行资格时重入，不消耗新的凭证'),
         ):
             button = QPushButton(title)
             button.setObjectName('quietButton')
@@ -1437,6 +1443,15 @@ class MainWindow(QMainWindow):
             box.addWidget(button)
             self.activity_buttons[action] = button
         left.addWidget(activities)
+        self.fishing_check_button = QPushButton('核对钓鱼结果与库存（不重发请求）')
+        self.fishing_check_button.clicked.connect(self.reconcile_fishing)
+        box.addWidget(self.fishing_check_button)
+        self.fishpond_button = QPushButton('兑换 FishPond NFT · 手动确认')
+        self.fishpond_button.clicked.connect(self.redeem_fishpond)
+        box.addWidget(self.fishpond_button)
+        self.boss_auction_button = QPushButton('查看 Boss 拍卖（官网钱包购买）')
+        self.boss_auction_button.clicked.connect(self.open_boss_auctions)
+        box.addWidget(self.boss_auction_button)
         travel, box = card("地图与复活")
         place(box, self.current_map_label)
         self.world_status.setWordWrap(True)
@@ -2829,6 +2844,15 @@ class MainWindow(QMainWindow):
         self.player_id = None
         self._activity_pending = None
         self._treasure_access_until = 0.0
+        self._boss_access_until = 0.0
+        self._fishing_active = False
+        self._fishing_inventory_pending = False
+        self._fishing_until = 0.0
+        self._activity_uncertain = False
+        self._boss_reward_keys = deque(maxlen=256)
+        self._fishpond_pending = False
+        self._fishpond_submitted = set()
+        self._api_request_ids = {}
         self._delivery_submit_pending = False
         self.monsters = {}
         self.monsters_by_map = {}
@@ -2976,9 +3000,6 @@ class MainWindow(QMainWindow):
             self.bridge.state.emit("服务器拒绝登录凭证…")
             self.append_log("服务端拒绝游戏会话 Token：login_required。")
         elif kind == "welcome" and isinstance(packet.get("position"), dict):
-            if self._activity_pending and self._activity_pending[0] == 'useFishingRod':
-                self._activity_pending = None
-                self.activity_status.setText('服务器已确认钓竿传送位置。')
             self.welcome_at = time.monotonic()
             position = packet["position"]
             self.set_current_map(position.get("map", 1))
@@ -3106,6 +3127,7 @@ class MainWindow(QMainWindow):
             else:
                 self.expire_nearby_players()
         elif kind == "travel_result":
+            self.accept_activity_resources(packet, packet.get("serverTime"))
             self.move_timer.stop()
             self.stop_chase()
             self.stop_patrol(reset_anchor=True)
@@ -3546,7 +3568,7 @@ class MainWindow(QMainWindow):
             target = 2
         if target not in MAP_NAMES or target == 1:
             target = 2
-        if target == 5 and not self.use_ticket.isChecked():
+        if target == 5 and not self.boss_entry_allowed():
             self.quest_status.setText("任务已完成，但刷怪目标为废弃遗迹；请先勾选使用入场券。")
             return False
         self.questless_farm_mode = True
@@ -3769,6 +3791,8 @@ class MainWindow(QMainWindow):
         return quality_order.get(quality, 0), level
 
     def auto_equip_best_inventory_item(self) -> None:
+        if self.fishing_busy():
+            return
         if (not hasattr(self, "auto_equip_better") or not self.auto_equip_better.isChecked()
                 or self._auto_equip_pending_id is not None):
             return
@@ -3971,7 +3995,7 @@ class MainWindow(QMainWindow):
             self.quest_map_target = None
             self.quest_map_quest_id = None
             return
-        if 5 in route and not self.use_ticket.isChecked():
+        if 5 in route and not self.boss_entry_allowed():
             self.travel_status.setText("任务目标在废弃遗迹；请先勾选使用入场券。")
             return
         if farm_fallback:
@@ -4148,7 +4172,7 @@ class MainWindow(QMainWindow):
                 target = int(self.return_map.currentData())
             except (TypeError, ValueError):
                 target = 2
-        if target not in MAP_NAMES or target == 1 or (target == 5 and not self.use_ticket.isChecked()):
+        if target not in MAP_NAMES or target == 1 or (target == 5 and not self.boss_entry_allowed()):
             target = 2
         self.questless_farm_target = target
         self.auto_attack.setChecked(True)
@@ -4439,6 +4463,30 @@ class MainWindow(QMainWindow):
             if data.get('socialApiLoginGeneration', self._login_generation) != self._login_generation:
                 return
             key = str(data["socialApiKey"])
+            if data.get('socialApiRequestId', self._api_request_ids.get(key)) != self._api_request_ids.get(key):
+                return
+            if key == 'fishingInventory':
+                equipment = data.get('socialApiResult')
+                if not data.get('socialApiError') and isinstance(equipment, dict) and isinstance(equipment.get('items'), list):
+                    self.api_equipment = equipment
+                    self._fishing_inventory_pending = False
+                    self.activity_status.setText(self.activity_status.text().split('；')[0] + '；库存已核对，可手动开启新的方案。')
+                    self.update_social_inventory()
+                else:
+                    self.activity_status.setText('钓鱼库存核对失败，继续锁定重复操作；请再次核对。')
+                self.update_activity_controls()
+                return
+            if key == 'fishpondRedeem':
+                self._fishpond_pending = False
+                result = data.get('socialApiResult', {})
+                self.activity_status.setText('兑换提交成功，预计 3 个工作日，到账以服务器为准。'
+                    if not data.get('socialApiError') and isinstance(result, dict) and result.get('ok')
+                    else '兑换结果未确认，请刷新库存并核对记录，勿重复提交同一道具。')
+                self.refresh_profile_data(force=True)
+                return
+            if key == 'bossAuctions':
+                self.show_boss_auctions(data)
+                return
             if key == 'questDelivery':
                 self.quest_delivery_button.setEnabled(True)
                 if data.get('socialApiError'):
@@ -4859,8 +4907,12 @@ class MainWindow(QMainWindow):
 
         login_generation = self._login_generation
 
+        request_id = self._api_request_ids.get(key, 0) + 1
+        self._api_request_ids[key] = request_id
+
         def worker() -> None:
-            result = {"socialApiKey": key, 'socialApiLoginGeneration': login_generation}
+            result = {"socialApiKey": key, 'socialApiLoginGeneration': login_generation,
+                      'socialApiRequestId': request_id}
             try:
                 encoded = json.dumps(body).encode("utf-8") if body is not None else None
                 headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
@@ -5549,6 +5601,8 @@ class MainWindow(QMainWindow):
         return (310.0 if impact else 295.0) if self.current_character_class() == 'ARCHER' else (60.0 if impact else 55.0)
 
     def attack_monster(self, encounter_id: str) -> bool:
+        if self.fishing_busy():
+            return False
         monster = self.monsters.get(encounter_id)
         if monster is not None and not self.monster_matches_level_range(monster):
             self.combat_status.setText("该怪物不在设定的等级范围内，已跳过。")
@@ -5620,6 +5674,8 @@ class MainWindow(QMainWindow):
         return impact_delay_ms, animation_duration, speed_multiplier
 
     def send_monster_attack(self, encounter_id: str, ticket: str, generation: int | None = None) -> None:
+        if self.fishing_busy():
+            return False
         if self.ws is None or (generation is not None and generation != self.combat_generation):
             return
         monster = self.monsters.get(encounter_id)
@@ -5658,6 +5714,10 @@ class MainWindow(QMainWindow):
             pass
 
     def toggle_auto_attack(self, enabled: bool) -> None:
+        if enabled and self.fishing_busy():
+            self.auto_attack.setChecked(False)
+            self.combat_status.setText('正在钓鱼或核对结果，不能启动战斗。')
+            return
         if enabled and (self.server_dead or self.respawn_pending):
             self.combat_timer.stop()
             self.combat_status.setText("自动战斗已保留；等待服务端确认复活后恢复。")
@@ -5687,6 +5747,8 @@ class MainWindow(QMainWindow):
 
 
     def auto_attack_tick(self) -> None:
+        if self.fishing_busy():
+            return False
         if self.task_limited_mode.isChecked() and not self.has_active_monster_quest():
             self.combat_timer.stop()
             self.stop_chase()
@@ -5779,13 +5841,108 @@ class MainWindow(QMainWindow):
     def release_auto_potion_request(self) -> None:
         self.auto_potion_pending = False
 
+    def boss_entry_allowed(self) -> bool:
+        return self.use_ticket.isChecked() or self._boss_access_until > time.monotonic()
+
     def fishing_rod(self) -> dict | None:
         return next((item for item in self.api_equipment.get('items', [])
                      if isinstance(item, dict) and item.get('itemCode') == 'WOODEN_FISHING_ROD'
                      and item.get('playerItemId') is not None), None)
 
+    def fishing_busy(self) -> bool:
+        pending = getattr(self, '_activity_pending', None)
+        return bool(getattr(self, '_fishing_active', False) or getattr(self, '_fishing_inventory_pending', False) or
+                    (pending and pending[0] == 'useFishingRod'))
+
+    def redeem_fishpond(self) -> None:
+        if self._fishpond_pending or self.fishing_busy() or not self.world_ready:
+            self.activity_status.setText('角色未就绪或有操作正在处理。')
+            return
+        items = [item for item in self.api_equipment.get('items', [])
+                 if item.get('itemCode') == 'FISHPOND_NFT' and item.get('playerItemId') is not None
+                 and not item.get('equipped') and not item.get('locked') and not item.get('listed')
+                 and str(item['playerItemId']) not in self._fishpond_submitted]
+        if not items:
+            self.activity_status.setText('没有可兑换的 FishPond NFT；请先刷新背包，已提交道具不重复兑换。')
+            return
+        labels = [f"FishPond NFT · 道具 ID {item['playerItemId']}" for item in items]
+        chosen, ok = QInputDialog.getItem(self, '选择兑换道具', '只兑换手动选择的一个道具：', labels, 0, False)
+        if not ok:
+            return
+        item = items[labels.index(chosen)]
+        if QMessageBox.question(self, '确认兑换 FishPond NFT',
+            '提交成功后该道具将从背包消失，不能再出售。NFT 将兑换至绑定钱包，官网提示约 3 个工作日。确认提交？') != QMessageBox.StandardButton.Yes:
+            return
+        self._fishpond_submitted.add(str(item['playerItemId']))
+        self._fishpond_pending = True
+        self.request_social_api('fishpondRedeem', '/equipment/fishpond/redeem', 'POST',
+                                {'playerItemId': item['playerItemId'], 'confirmed': True})
+
+    def open_boss_auctions(self) -> None:
+        if not self.world_ready:
+            self.activity_status.setText('请先连接账号。')
+            return
+        self.request_social_api('bossAuctions', '/boss-auctions')
+
+    def show_boss_auctions(self, data: dict) -> None:
+        if data.get('socialApiError'):
+            self.activity_status.setText('读取 Boss 拍卖失败：' + str(data['socialApiError']))
+            return
+        payload = data.get('socialApiResult', {})
+        entries = payload.get('auctions', []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list):
+            self.activity_status.setText('无法识别拍卖列表，请稍后重试。')
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Boss 拍卖 · 当前一页')
+        dialog.resize(720, 480)
+        layout = QVBoxLayout(dialog)
+        notice = QLabel('展示服务器当前页；资格、价格和成交以官网订单为准。购买请在官网连接钱包确认。')
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+        table = QPlainTextEdit()
+        table.setReadOnly(True)
+        table.setPlainText(json.dumps(entries, ensure_ascii=False, indent=2) if entries else '当前没有拍卖。')
+        layout.addWidget(table)
+        link = QLabel('<a href="https://game.tabby.meme/">打开官网处理拍卖与付款</a>')
+        link.setOpenExternalLinks(True)
+        layout.addWidget(link)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+
+    def stop_activity_automation(self) -> None:
+        self.auto_attack.setChecked(False)
+        self.auto_quest.setChecked(False)
+        self.quest_map_auto.setChecked(False)
+        self.quest_map_target = None
+        self.quest_map_quest_id = None
+        self.questless_farm_mode = False
+        self.questless_farm_target = None
+        self.return_map_target = None
+        self.manual_map_target = None
+        self.cancel_travel()
+        self.stop_chase()
+        self.stop_patrol(reset_anchor=True)
+        self.cancel_map_path_request()
+        self.combat_timer.stop()
+        self.combat_generation += 1
+
+    def reconcile_fishing(self) -> None:
+        if self._fishing_active or self._activity_uncertain:
+            answer = QMessageBox.question(self, '核对钓鱼状态',
+                '结果尚未确认。请先确认角色已结束钓鱼；本操作只刷新库存，不会重发钓鱼请求。继续核对？')
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._activity_uncertain = False
+        self._fishing_active = False
+        self._activity_pending = None
+        self._fishing_inventory_pending = True
+        self.request_social_api('fishingInventory', '/equipment')
+        self.activity_status.setText('正在核对服务器库存；不会自动再次钓鱼。')
+        self.update_activity_controls()
+
     def accept_activity_resources(self, data: dict, server_time=None) -> None:
-        for key in ('staminaPotions', 'treasureStones', 'treasureExpiresAt'):
+        for key in ('staminaPotions', 'treasureStones', 'treasureExpiresAt', 'bossExpiresAt', 'bossTickets'):
             if key in data:
                 self.last_self_state[key] = data[key]
         expires = data.get('treasureExpiresAt', data.get('expiresAt'))
@@ -5794,15 +5951,28 @@ class MainWindow(QMainWindow):
                 self._treasure_access_until = time.monotonic() + max(0.0, (float(expires) - float(server_time)) / 1000)
             except (TypeError, ValueError):
                 pass
+        if 'bossExpiresAt' in data and server_time is not None:
+            try:
+                self._boss_access_until = time.monotonic() + max(0.0, (float(data['bossExpiresAt']) - float(server_time)) / 1000)
+            except (TypeError, ValueError):
+                pass
 
     def update_activity_controls(self) -> None:
         if not hasattr(self, 'activity_buttons'):
             return
         if self._activity_pending and time.monotonic() - self._activity_pending[1] > 10:
-            self._activity_pending = None
-            self.activity_status.setText('操作结果等待超时；请核对库存后重试。')
+            if self._activity_pending[0] == 'useFishingRod':
+                self._activity_uncertain = True
+                self.activity_status.setText('钓鱼结果等待超时，已锁定重复操作；请点击核对库存。')
+            else:
+                self._activity_pending = None
+                self.activity_status.setText('操作结果等待超时；请核对库存后重试。')
+        if self._fishing_active and time.monotonic() > self._fishing_until + 10:
+            self._activity_uncertain = True
+            self.activity_status.setText('钓鱼结果未返回，请核对库存；不会自动重发消耗请求。')
         ready = bool(self.ws is not None and self.world_ready and not self.server_dead
-                     and not self.respawn_pending and self.pending_destination is None and not self._activity_pending)
+                     and not self.respawn_pending and self.pending_destination is None and not self._activity_pending
+                     and not self.fishing_busy() and not self._activity_uncertain)
         remaining = max(0, math.ceil(self._treasure_access_until - time.monotonic()))
         stones = int(self.last_self_state.get('treasureStones', 0) or 0)
         potions = int(self.last_self_state.get('staminaPotions', 0) or 0)
@@ -5811,11 +5981,15 @@ class MainWindow(QMainWindow):
                    'useTreasureStone': stones > 0 and self.current_map != 7 and remaining == 0,
                    'enterTreasureLand': remaining > 0 and self.current_map != 7,
                    'leaveTreasureLand': self.current_map == 7,
-                   'useFishingRod': self.fishing_rod() is not None}
+                   'useFishingRod': self.fishing_rod() is not None,
+                   'enterBossMap': self._boss_access_until > time.monotonic() and self.current_map != 5}
         for action, button in self.activity_buttons.items():
             button.setEnabled(ready and allowed[action])
         self.activity_buttons['enterTreasureLand'].setText(
             f'重返秘宝之地 · 剩余 {remaining // 60:02d}:{remaining % 60:02d}')
+        boss_remaining = max(0, math.ceil(self._boss_access_until - time.monotonic()))
+        self.activity_buttons['enterBossMap'].setText(
+            f'重返 Boss 地图 · 剩余 {boss_remaining // 60:02d}:{boss_remaining % 60:02d}')
         self.activity_status.setToolTip(f'体力恢复药水 {potions} 瓶 · 秘宝之石 {stones} 颗')
         self.activity_resources.setText(f'体力药水 {potions} 瓶 · 秘宝之石 {stones} 颗' +
                                        (' · 持有木钓竿' if self.fishing_rod() else ''))
@@ -5830,17 +6004,7 @@ class MainWindow(QMainWindow):
         if action == 'useFishingRod':
             packet['playerItemId'] = self.fishing_rod()['playerItemId']
         if action != 'useStaminaPotion':
-            self.auto_attack.setChecked(False)
-            self.auto_quest.setChecked(False)
-            self.quest_map_auto.setChecked(False)
-            self.quest_map_target = None
-            self.quest_map_quest_id = None
-            self.questless_farm_mode = False
-            self.questless_farm_target = None
-            self.cancel_travel()
-            self.stop_chase()
-            self.stop_patrol(reset_anchor=True)
-            self.combat_generation += 1
+            self.stop_activity_automation()
         try:
             self.send_stationary_sync(force=True)
             self.send_game_packet(packet)
@@ -5854,11 +6018,57 @@ class MainWindow(QMainWindow):
 
     def accept_activity_packet(self, packet: dict) -> bool:
         kind = packet.get('type')
+        if kind == 'boss_token_reward':
+            key = str(packet.get('rewardKey', ''))
+            try:
+                valid = float(packet.get('expiresAt', 0)) / 1000 > time.time()
+            except (ValueError, TypeError):
+                valid = False
+            if key and key not in self._boss_reward_keys and valid:
+                self._boss_reward_keys.append(key)
+                self.append_log(f"Boss 奖励通知：{packet.get('monsterKey', '')} · {packet.get('amount', '0')}（到账以服务器记录为准）")
+            return True
+        if kind == 'fishing_started':
+            if not self.world_ready:
+                return True
+            self.stop_activity_automation()
+            self._fishing_active = True
+            self._activity_uncertain = False
+            try:
+                duration = max(0, min(60000, int(packet.get('durationMs', 3000))))
+            except (ValueError, TypeError):
+                duration = 3000
+            self._fishing_until = time.monotonic() + duration / 1000
+            self.activity_status.setText(f'服务器确认正在钓鱼，约 {duration / 1000:g} 秒；等待结果。')
+            self.update_activity_controls()
+            return True
+        if kind == 'fishing_result':
+            self._fishing_active = False
+            self._activity_pending = None
+            self._activity_uncertain = False
+            self._fishing_inventory_pending = True
+            names = {'EXPERIENCE': '经验鱼', 'FISHPOND': 'FishPond NFT', 'PURPLE': '紫色装备',
+                     'OTHER': '道具', 'STAMINA_POTION': '体力药水', 'BOSS_ENTRY_TICKET': 'Boss 凭证',
+                     'TREASURE_STONE': '秘宝之石', 'TOWN_STONE': '回城石', 'EMPTY': '未钓到物品'}
+            outcome = str(packet.get('outcome', 'EMPTY'))
+            self.activity_status.setText('钓鱼结果：' + names.get(outcome, outcome) +
+                (f" · 经验 +{packet.get('experience', 2500)}" if outcome == 'EXPERIENCE' else '') + '；正在核对库存。')
+            self.append_log(self.activity_status.text())
+            self.request_social_api('fishingInventory', '/equipment')
+            self.refresh_profile_data(force=True)
+            self.update_activity_controls()
+            return True
         if kind in ('stamina_potion_dropped', 'treasure_stone_dropped'):
             self.append_log('获得体力恢复药水。' if kind == 'stamina_potion_dropped' else '获得秘宝之石。')
             return True  # Quantity comes from the authoritative snapshot/economy event.
         if kind in ('treasure_failed', 'fishing_rod_failed', 'stamina_potion_failed'):
-            self._activity_pending = None
+            if kind == 'fishing_rod_failed':
+                self._fishing_active = False
+                self._activity_uncertain = False
+                self._fishing_inventory_pending = True
+                self.request_social_api('fishingInventory', '/equipment')
+            if not self.fishing_busy() or kind == 'fishing_rod_failed':
+                self._activity_pending = None
             self.activity_status.setText('服务器拒绝操作：请确认道具、通行时间及是否处于战斗中。')
             self.update_activity_controls()
             return True
@@ -5890,7 +6100,8 @@ class MainWindow(QMainWindow):
         self.stop_chase()
         self.stop_patrol(reset_anchor=True)
         self.combat_generation += 1
-        self._activity_pending = None
+        if not self.fishing_busy():
+            self._activity_pending = None
         self.movement_revision = revision
         self.set_current_map(packet.get('map', self.current_map))
         self.world_x, self.world_y = packet.get('x', self.world_x), packet.get('y', self.world_y)
@@ -5948,6 +6159,8 @@ class MainWindow(QMainWindow):
         self._pending_path_request = None
         self._path_future = None
         kind, context = pending["kind"], pending["context"]
+        if self.fishing_busy():
+            return
 
         if kind == "patrol":
             if (error or not route or self.current_map != context["map"]
@@ -6020,6 +6233,8 @@ class MainWindow(QMainWindow):
             self.move_timer.start()
 
     def start_patrol(self) -> None:
+        if self.fishing_busy():
+            return False
         """Search the current map while waiting for server-reported spawns."""
         if self._pending_path_request is not None:
             return
@@ -6034,6 +6249,13 @@ class MainWindow(QMainWindow):
         if self.patrol_anchor is None:
             self.patrol_anchor = (float(self.world_x), float(self.world_y))
         start = (float(self.world_x), float(self.world_y))
+        if self.current_map in (8, 9, 10):
+            index = self.patrol_sweep_row
+            self.patrol_sweep_row += 1
+            self.request_map_path(self.current_map, start, {'sweep': index}, 'patrol',
+                                  {'map': self.current_map, 'row': index, 'row_count': 1})
+            self.combat_status.setText('正在后台规划新地图巡逻路线…')
+            return
         if self.current_map in (2, 7):
             self.start_snowfield_sweep(start)
             return
@@ -6108,6 +6330,8 @@ class MainWindow(QMainWindow):
         self.combat_status.setText(f"正在后台规划{MAP_NAMES[self.current_map]}整图路线…")
 
     def advance_patrol(self) -> None:
+        if self.fishing_busy():
+            return False
         if (self.ws is None or not self.world_ready or self.current_map not in MAP_NAMES
                 or self.current_map == 1
                 or not self.auto_attack.isChecked()
@@ -6162,6 +6386,8 @@ class MainWindow(QMainWindow):
             self.patrol_ring = 320.0
 
     def start_chase(self, encounter_id: str, *, recovery: bool = False) -> None:
+        if self.fishing_busy():
+            return False
         if not recovery:
             self.movement_corrections = 0
         monster = self.monsters.get(encounter_id)
@@ -6171,7 +6397,7 @@ class MainWindow(QMainWindow):
             return
         start = float(self.world_x), float(self.world_y)
         goal = float(monster["x"]), float(monster["y"])
-        if self.current_map in (1, 2, 7):
+        if self.current_map in MAP_FILES:
             self.request_map_path(self.current_map, start, goal, "chase",
                                   {"map": self.current_map, "encounter": encounter_id})
             self.combat_status.setText(f"正在后台规划到怪物 {encounter_id[:8]} 的路线…")
@@ -6210,6 +6436,8 @@ class MainWindow(QMainWindow):
         self.chase_timer.start()
 
     def advance_chase(self) -> None:
+        if self.fishing_busy():
+            return False
         if self.server_dead or self.respawn_pending:
             self.stop_chase()
             return
@@ -6349,6 +6577,8 @@ class MainWindow(QMainWindow):
             self.keepalive.stop()
 
     def travel_to(self, destination: int, *, recovery: bool = False) -> None:
+        if self.fishing_busy():
+            return False
         if destination == 7:
             self.request_activity('enterTreasureLand')
             return
@@ -6356,6 +6586,9 @@ class MainWindow(QMainWindow):
             self.request_activity('leaveTreasureLand')
             return
         if not self.world_ready or self.current_map is None or self.pending_destination is not None:
+            return
+        if destination != self.current_map and destination not in MAP_ROUTES.get(self.current_map, ()):
+            self.start_manual_map_travel(destination)
             return
         if not recovery:
             self.movement_corrections = 0
@@ -6373,10 +6606,10 @@ class MainWindow(QMainWindow):
         self.pending_portal = portal
         self.travel_attempt += 1
         attempt = self.travel_attempt
-        if portal and self.current_map == 1:
+        if portal and self.current_map in MAP_FILES:
             self.route_points = []
             self.travel_status.setText("正在后台规划前往主城入口的路线…")
-            self.request_map_path(1, (float(self.world_x), float(self.world_y)), portal,
+            self.request_map_path(self.current_map, (float(self.world_x), float(self.world_y)), portal,
                                   "portal", {"destination": destination,
                                              "attempt": attempt, "portal": portal})
             self.update_map_buttons()
@@ -6392,6 +6625,8 @@ class MainWindow(QMainWindow):
         self.update_map_buttons()
 
     def advance_to_portal(self) -> None:
+        if self.fishing_busy():
+            return False
         if self.server_dead or self.respawn_pending:
             self.move_timer.stop()
             return
@@ -6493,7 +6728,7 @@ class MainWindow(QMainWindow):
                     continue
                 next_route = route + [neighbor]
                 if neighbor == target:
-                    if 5 in next_route and not self.use_ticket.isChecked():
+                    if 5 in next_route and not self.boss_entry_allowed():
                         self.manual_map_target = None
                         self.manual_coordinate_target = None
                         self.travel_status.setText("批量目标路线经过废弃遗迹；请先勾选使用入场券。")
@@ -6509,6 +6744,8 @@ class MainWindow(QMainWindow):
         self.travel_status.setText("找不到通往批量地图目标的已知路线。")
 
     def start_manual_map_travel(self, destination: int, coordinate_target=None) -> None:
+        if self.fishing_busy():
+            return False
         if destination == 7:
             self.travel_to(7)
             return
@@ -6520,6 +6757,8 @@ class MainWindow(QMainWindow):
         self.continue_manual_map_travel()
 
     def move_to_coordinate(self, x: float, y: float) -> bool:
+        if self.fishing_busy():
+            return False
         """Walk to a manually selected world coordinate on the current map."""
         if (self.ws is None or not self.world_ready or self.server_dead or self.respawn_pending
                 or self.pending_destination is not None or self.current_map is None
@@ -6540,7 +6779,7 @@ class MainWindow(QMainWindow):
         self.pending_portal = None
         self.return_map_target = None
         self.manual_move_active = True
-        if self.current_map in (1, 2, 7):
+        if self.current_map in MAP_FILES:
             self.travel_status.setText("正在后台规划手动移动路线…")
             self.request_map_path(self.current_map, start, goal, "coordinate",
                                   {"map": self.current_map, "goal": goal})
@@ -6574,7 +6813,7 @@ class MainWindow(QMainWindow):
                     continue
                 next_route = route + [neighbor]
                 if neighbor == target:
-                    if 5 in next_route and not self.use_ticket.isChecked():
+                    if 5 in next_route and not self.boss_entry_allowed():
                         self.return_map_target = None
                         self.travel_status.setText("自动返回遗迹需要先勾选使用入场券。")
                         return
@@ -6599,12 +6838,14 @@ class MainWindow(QMainWindow):
         self.continue_return_map()
 
     def send_travel(self, destination: int, attempt: int) -> None:
+        if self.fishing_busy():
+            return False
         if self.pending_destination != destination or self.travel_attempt != attempt:
             return
         quest_id = (self.quest_map_quest_id if self.quest_map_target is not None
                     else 0 if self.questless_farm_mode else self.quest_id.value())
         travel = {"action": "travel", "map": destination,
-                  "questId": quest_id or 0, "useTicket": self.use_ticket.isChecked(),
+                  "questId": quest_id or 0, "useTicket": self.use_ticket.isChecked() and self._boss_access_until <= time.monotonic(),
                   "movementRevision": self.movement_revision}
         try:
             self.send_game_packet(travel)

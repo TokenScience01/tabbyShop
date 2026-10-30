@@ -345,5 +345,93 @@
   {
     "itemCode": "STARTER_SWORD",
     "nameZh": "铁短剑"
+  },
+  {
+    "itemCode": "SWORD_BARBARIAN",
+    "nameZh": "巨魔剑"
+  },
+  {
+    "itemCode": "SPEAR_BARBARIAN",
+    "nameZh": "巨魔长枪"
+  },
+  {
+    "itemCode": "BOW_BARBARIAN",
+    "nameZh": "巨魔弓"
+  },
+  {
+    "itemCode": "HELMET_BARBARIAN",
+    "nameZh": "巨魔头盔"
+  },
+  {
+    "itemCode": "ARMOR_BARBARIAN",
+    "nameZh": "巨魔护甲"
+  },
+  {
+    "itemCode": "BOOTS_BARBARIAN",
+    "nameZh": "巨魔战靴"
+  },
+  {
+    "itemCode": "RING_BARBARIAN",
+    "nameZh": "巨魔戒指"
+  },
+  {
+    "itemCode": "AMULET_BARBARIAN",
+    "nameZh": "巨魔护身符"
+  },
+  {
+    "itemCode": "MARS",
+    "nameZh": "MARS"
+  },
+  {
+    "itemCode": "FISHPOND_NFT",
+    "nameZh": "FishPond NFT"
+  },
+  {
+    "itemCode": "SWORD_NIUMA",
+    "nameZh": "暗黑牛魔剑"
+  },
+  {
+    "itemCode": "SPEAR_NIUMA",
+    "nameZh": "暗黑牛魔长枪"
+  },
+  {
+    "itemCode": "BOW_NIUMA",
+    "nameZh": "暗黑牛魔弓"
+  },
+  {
+    "itemCode": "HELMET_NIUMA",
+    "nameZh": "暗黑牛魔头盔"
+  },
+  {
+    "itemCode": "ARMOR_NIUMA",
+    "nameZh": "暗黑牛魔护甲"
+  },
+  {
+    "itemCode": "BOOTS_NIUMA",
+    "nameZh": "暗黑牛魔战靴"
+  },
+  {
+    "itemCode": "RING_NIUMA",
+    "nameZh": "暗黑牛魔戒指"
+  },
+  {
+    "itemCode": "AMULET_NIUMA",
+    "nameZh": "暗黑牛魔护身符"
+  },
+  {
+    "itemCode": "BOWP2",
+    "nameZh": "铁卫弓"
+  },
+  {
+    "itemCode": "BOWP3",
+    "nameZh": "精钢弓"
+  },
+  {
+    "itemCode": "BOWP4",
+    "nameZh": "黑锋弓"
+  },
+  {
+    "itemCode": "BOWP5",
+    "nameZh": "秘银弓"
   }
 ]

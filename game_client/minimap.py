@@ -2,12 +2,13 @@
 import json
 from functools import lru_cache
 from pathlib import Path
+from town_navigation import MAP_FILES
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=6)
 def terrain_path(filename):
     """Share immutable map geometry across account dashboards."""
     cells = json.loads(Path(__file__).with_name(filename).read_text())['cells']
@@ -40,8 +41,7 @@ class TacticalMap(QWidget):
         self.portals = portals
         self.terrain = {}
         self.setMinimumHeight(320)
-        for map_id, filename in ((1, 'town_navigation.json'), (2, 'snowfield_navigation.json'),
-                                 (7, 'treasure_navigation.json')):
+        for map_id, filename in MAP_FILES.items():
             try:
                 self.terrain[map_id] = terrain_path(filename)
             except (OSError, KeyError, ValueError):

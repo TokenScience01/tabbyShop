@@ -4,7 +4,7 @@ import atexit
 import multiprocessing
 import threading
 
-from town_navigation import find_map_path
+from town_navigation import find_map_path, find_map_sweep_path
 
 _pool = None
 _pool_lock = threading.Lock()
@@ -16,6 +16,8 @@ def submit_map_path(map_id, start, goal):
         if _pool is None:
             _pool = ProcessPoolExecutor(max_workers=2,
                                        mp_context=multiprocessing.get_context('spawn'))
+        if isinstance(goal, dict) and 'sweep' in goal:
+            return _pool.submit(find_map_sweep_path, map_id, start, goal['sweep'])
         return _pool.submit(find_map_path, map_id, start, goal)
 
 

@@ -9,7 +9,7 @@ from game_client import town_navigation as nav
 class NavigationTests(unittest.TestCase):
     def test_indexed_collision_matches_original_geometry(self):
         rng = random.Random(117)
-        for map_id in (1, 2, 7):
+        for map_id in nav.MAP_FILES:
             cells, obstacles = nav._map_data(map_id)
             points = [(cx * 64 + rng.uniform(0, 64), cy * 64 + rng.uniform(0, 64))
                       for cx, cy in rng.choices(sorted(cells), k=2000)]

@@ -11,7 +11,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QLabel, QMessageBox,
                                QPushButton, QTableWidget, QTabWidget, QCheckBox, QFrame)
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QSettings, QTimer
@@ -1936,6 +1936,124 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('#E7B85E', game.combat_status.styleSheet())
         game.set_combat_feedback('攻击被拒绝：invalid_target', 'error')
         self.assertIn('#E47782', game.combat_status.styleSheet())
+
+    def prepare_fishing_account(self):
+        game = self.window.game
+        game.world_ready = True
+        game.current_map = 1
+        game.world_x = game.world_y = 100
+        game.ws = Mock()
+        game.api_equipment = {'items': [{'playerItemId': 42, 'itemCode': 'WOODEN_FISHING_ROD'}]}
+        self.addCleanup(lambda: setattr(game, 'ws', None))
+        return game
+
+    def test_fishing_waits_for_result_and_fresh_inventory(self):
+        game = self.prepare_fishing_account()
+        with patch.object(game, 'send_game_packet') as send, patch.object(game, 'request_social_api') as api, patch.object(game, 'refresh_profile_data'):
+            self.assertTrue(game.request_activity('useFishingRod'))
+            game.accept_packet({'type': 'welcome', 'position': {'map': 1, 'x': 200, 'y': 200}})
+            self.assertTrue(game.fishing_busy())
+            game.accept_packet({'type': 'fishing_started', 'durationMs': 3000})
+            self.assertTrue(game._fishing_active)
+            self.assertFalse(game.request_activity('useFishingRod'))
+            send.reset_mock()
+            game.attack_monster('anything')
+            game.move_to_coordinate(500, 500)
+            game.travel_to(2)
+            game.auto_attack.setChecked(True)
+            self.assertFalse(game.auto_attack.isChecked())
+            send.assert_not_called()
+            game.accept_packet({'type': 'fishing_result', 'outcome': 'EXPERIENCE', 'experience': 2500})
+            self.assertIn('2500', game.activity_status.text())
+            self.assertTrue(game.fishing_busy())
+            api.assert_called_with('fishingInventory', '/equipment')
+            game.accept_profile_data({'socialApiKey': 'fishingInventory', 'socialApiResult': {'items': []}})
+            self.assertFalse(game.fishing_busy())
+            self.assertIsNone(game.fishing_rod())
+            self.assertFalse(game.activity_buttons['useFishingRod'].isEnabled())
+
+    def test_fishing_timeout_does_not_unlock_or_resend_consumption(self):
+        import time
+        game = self.prepare_fishing_account()
+        with patch.object(game, 'send_game_packet') as send:
+            self.assertTrue(game.request_activity('useFishingRod'))
+            game._activity_pending = ('useFishingRod', time.monotonic() - 20)
+            game.update_activity_controls()
+            self.assertTrue(game._activity_uncertain)
+            self.assertFalse(game.request_activity('useFishingRod'))
+            self.assertEqual(sum(call.args[0].get('action') == 'useFishingRod' for call in send.call_args_list), 1)
+
+    def test_fishing_inventory_error_keeps_lock_and_stale_result_is_ignored(self):
+        game = self.prepare_fishing_account()
+        game._fishing_inventory_pending = True
+        game._api_request_ids['fishingInventory'] = 2
+        game.accept_profile_data({'socialApiKey': 'fishingInventory', 'socialApiRequestId': 1,
+                                  'socialApiResult': {'items': []}})
+        self.assertTrue(game.fishing_busy())
+        game.accept_profile_data({'socialApiKey': 'fishingInventory', 'socialApiRequestId': 2,
+                                  'socialApiError': 'timeout'})
+        self.assertTrue(game.fishing_busy())
+
+    def test_boss_pass_has_independent_expiry_and_no_ticket_consumption(self):
+        import time
+        game = self.prepare_fishing_account()
+        game.use_ticket.setChecked(False)
+        game.accept_activity_resources({'bossExpiresAt': 3601000, 'treasureExpiresAt': 1000}, 1000)
+        self.assertTrue(game.boss_entry_allowed())
+        self.assertGreater(game._boss_access_until, time.monotonic() + 3590)
+        self.assertLessEqual(game._treasure_access_until, time.monotonic())
+        with patch.object(game, 'send_game_packet') as send:
+            self.assertTrue(game.request_activity('enterBossMap'))
+            self.assertEqual(send.call_args.args[0], {'action': 'enterBossMap'})
+
+    def test_boss_rewards_ignore_expired_and_duplicate_notifications(self):
+        import time
+        game = self.window.game
+        packet = {'type': 'boss_token_reward', 'rewardKey': 'example-reward', 'monsterKey': 'troll',
+                  'amount': '1.25', 'expiresAt': (time.time() + 60) * 1000}
+        with patch.object(game, 'append_log') as log:
+            game.accept_packet(packet)
+            game.accept_packet(packet)
+            game.accept_packet(dict(packet, rewardKey='expired', expiresAt=1))
+            self.assertEqual(log.call_count, 1)
+
+    def test_fishpond_redeem_requires_confirmation_and_blocks_duplicate_item(self):
+        game = self.prepare_fishing_account()
+        game.api_equipment = {'items': [{'playerItemId': 77, 'itemCode': 'FISHPOND_NFT'}]}
+        with patch('wss_tester.QInputDialog.getItem', return_value=('FishPond NFT · 道具 ID 77', True)), patch('wss_tester.QMessageBox.question', return_value=QMessageBox.StandardButton.Yes), patch.object(game, 'request_social_api') as api, patch.object(game, 'refresh_profile_data'):
+            game.redeem_fishpond()
+            api.assert_called_once_with('fishpondRedeem', '/equipment/fishpond/redeem', 'POST',
+                                       {'playerItemId': 77, 'confirmed': True})
+            game.accept_profile_data({'socialApiKey': 'fishpondRedeem', 'socialApiError': 'timeout'})
+            game.redeem_fishpond()
+            self.assertEqual(api.call_count, 1)
+
+    def test_new_maps_use_worker_navigation_and_have_routes(self):
+        from wss_tester import MAP_ROUTES, PORTAL_CENTERS
+        game = self.prepare_fishing_account()
+        for source, target in ((6, 8), (4, 9), (2, 10)):
+            self.assertIn(target, MAP_ROUTES[source])
+            self.assertIn(source, MAP_ROUTES[target])
+            self.assertEqual(PORTAL_CENTERS[(target, source)], (3232, 6240))
+        game.current_map = 8
+        with patch.object(game, 'request_map_path') as route:
+            self.assertTrue(game.move_to_coordinate(3232, 5984))
+            self.assertEqual(route.call_args.args[0], 8)
+
+    def test_batch_start_skips_fishing_without_changing_automation(self):
+        game = self.prepare_fishing_account()
+        game._fishing_active = True
+        game.status.setText('已连接')
+        self.window._game_sessions = {'test-account': game}
+        selected = QCheckBox()
+        selected.setChecked(True)
+        self.window.planner_account_checks = {'test-account': selected}
+        game.auto_quest.setChecked(False)
+        with patch.object(game, 'accept_next_monster_quest') as quest:
+            self.window.start_multi_account_plan()
+            quest.assert_not_called()
+        self.assertFalse(game.auto_quest.isChecked())
+        self.assertIn('钓鱼', self.window.planner_status.text())
 
 
 if __name__ == '__main__':

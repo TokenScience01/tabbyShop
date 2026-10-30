@@ -10,16 +10,17 @@ from pathlib import Path
 
 
 PLAYER_CLEARANCE = 16
-MAP_FILES = {1: "town_navigation.json", 2: "snowfield_navigation.json", 7: "treasure_navigation.json"}
+MAP_FILES = {1: "town_navigation.json", 2: "snowfield_navigation.json", 7: "treasure_navigation.json",
+             8: "cave_navigation.json", 9: "oasis_navigation.json", 10: "frozen_navigation.json"}
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=6)
 def _map_data(map_id: int = 1) -> tuple[set[tuple[int, int]], list[dict]]:
     data = json.loads(Path(__file__).with_name(MAP_FILES[map_id]).read_text())
     return {tuple(cell) for cell in data["cells"]}, data["obstacles"]
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=6)
 def _obstacle_bins(map_id: int) -> dict:
     """Index expanded collision bounds; retain the original ellipse test."""
     bins = {}
@@ -125,6 +126,33 @@ def find_map_path(map_id: int, start: tuple[float, float], goal: tuple[float, fl
         result.append(points[farthest])
         index = farthest
     return result
+
+
+@lru_cache(maxsize=6)
+def _sweep_points(map_id: int) -> tuple:
+    """Choose one walkable point per 320px sector, including irregular maps."""
+    sectors = {}
+    for cx, cy in sorted(_map_data(map_id)[0]):
+        point = (cx * 64 + 32, cy * 64 + 32)
+        if _walkable(*point, map_id):
+            sectors.setdefault((cx // 5, cy // 5), []).append(point)
+    points = []
+    for (sx, sy), candidates in sorted(sectors.items(), key=lambda row: (row[0][1], row[0][0] * (-1 if row[0][1] % 2 else 1))):
+        center = (sx * 320 + 160, sy * 320 + 160)
+        point = min(candidates, key=lambda p: math.dist(p, center))
+        # Do not accidentally walk into a return portal during a sweep.
+        if map_id in (8, 9, 10) and math.dist(point, (3232, 6240)) < 220:
+            continue
+        points.append(point)
+    return tuple(points)
+
+
+def find_map_sweep_path(map_id: int, start: tuple, index: int) -> list:
+    points = _sweep_points(map_id)
+    if not points:
+        return []
+    goal = points[index % len(points)]
+    return find_map_path(map_id, start, goal)
 
 
 def find_town_path(start: tuple[float, float], goal: tuple[float, float]) -> list[tuple[float, float]]:
